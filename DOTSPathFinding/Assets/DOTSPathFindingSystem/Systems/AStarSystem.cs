@@ -1,28 +1,18 @@
-﻿using Unity.Entities;
-using Unity.Mathematics;
+﻿using Unity.Burst;
 using Unity.Collections;
-using Unity.Burst;
+using Unity.Entities;
 using Unity.Jobs;
+using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
 
 namespace Navigation.ECS
 {
-    /// <summary>
-    /// Processes A* path requests from the queue.
-    /// - Burst compiled job per request
-    /// - Max N requests processed per frame (configurable) to spread cost
-    /// - 2D (8 neighbour XZ) for ground units, 3D (26 neighbour) for flying
-    /// - Reads from baked ChunkStaticBlob — no Physics calls at runtime
-    /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(UnitMovementSystem))]
     public partial class AStarSystem : SystemBase
     {
-        // How many path requests to process per frame. Tune based on budget.
-        private const int MaxRequestsPerFrame = 8;
-
-        // Shared chunk lookup built each frame — passed into jobs as read-only
+        private const int MaxRequestsPerFrame = 32;
         private NativeHashMap<int2, BlobAssetReference<ChunkStaticBlob>> _chunkBlobMap;
 
         protected override void OnCreate()
@@ -41,7 +31,6 @@ namespace Navigation.ECS
         {
             var config = SystemAPI.GetSingleton<NavigationConfig>();
 
-            // ── Rebuild chunk blob map (cheap, just reference copies) ──
             _chunkBlobMap.Clear();
             foreach (var (chunk, staticData) in
                 SystemAPI.Query<RefRO<GridChunk>, RefRO<ChunkStaticData>>())
@@ -50,7 +39,6 @@ namespace Navigation.ECS
                     _chunkBlobMap[chunk.ValueRO.ChunkCoord] = staticData.ValueRO.Blob;
             }
 
-            // ── Collect pending requests, sorted by priority ──
             var requests = new NativeList<PathRequestEntry>(64, Allocator.Temp);
 
             foreach (var (request, requestEnabled, perms, entity) in
@@ -67,18 +55,13 @@ namespace Navigation.ECS
                 });
             }
 
-            // Sort by priority descending
             requests.Sort(new PriorityComparer());
 
-            // ── Process up to MaxRequestsPerFrame ──
             int toProcess = math.min(requests.Length, MaxRequestsPerFrame);
             var ecb = new EntityCommandBuffer(Allocator.Temp);
 
             for (int i = 0; i < toProcess; i++)
-            {
-                var entry = requests[i];
-                ProcessRequest(entry, config, ecb);
-            }
+                ProcessRequest(requests[i], config, ecb);
 
             ecb.Playback(EntityManager);
             ecb.Dispose();
@@ -94,28 +77,25 @@ namespace Navigation.ECS
             bool startLoaded = _chunkBlobMap.TryGetValue(startChunk, out var startBlob);
             bool endLoaded = _chunkBlobMap.TryGetValue(endChunk, out var endBlob);
 
-            // ── Both endpoints in the same loaded chunk ────────────────────
             if (math.all(startChunk == endChunk))
             {
-                if (!startLoaded) return; // Retry next frame
+                if (!startLoaded) return;
                 RunAStarInChunk(entry, config, startChunk, startBlob,
                                 entry.Request.Start, entry.Request.End, ecb);
             }
-            // ── Cross-chunk but destination chunk is loaded ────────────────
-            // Run A* entirely within the destination chunk, clamping the
-            // start to the nearest edge cell of that chunk when needed.
-            // Fixes the bug where (0,0,0) -> (-5,0,0) sent the agent to
-            // chunk-centre (32,0,32) before heading to the destination.
+            else if (startLoaded && endLoaded)
+            {
+                // Both chunks loaded — run multi-chunk A* so walls in ALL
+                // traversed chunks are respected, not just the destination chunk.
+                RunAStarMultiChunk(entry, config, ecb);
+            }
             else if (endLoaded)
             {
-                float3 effectiveStart = startLoaded
-                    ? entry.Request.Start
-                    : ClampWorldPosToChunk(entry.Request.Start, endChunk, config);
-
+                // Start chunk not loaded yet — clamp start into end chunk as fallback
+                float3 effectiveStart = ClampWorldPosToChunk(entry.Request.Start, endChunk, config);
                 RunAStarInChunk(entry, config, endChunk, endBlob,
                                 effectiveStart, entry.Request.End, ecb);
             }
-            // ── Destination chunk not loaded — macro nav ───────────────────
             else
             {
                 BuildMacroCrossChunkPath(entry, config, startChunk, endChunk, ecb);
@@ -125,9 +105,301 @@ namespace Navigation.ECS
         }
 
         /// <summary>
-        /// Clamps a world position so it falls inside the given chunk's cell grid.
-        /// Used when the agent is in an unloaded chunk but the destination chunk is ready.
+        /// A* across multiple loaded chunks. Converts all world positions to a single
+        /// flat cell index space covering all loaded chunks, then runs A* once.
+        /// Each cell index encodes (chunkCoord, localCell) so walls in every chunk are checked.
         /// </summary>
+        private void RunAStarMultiChunk(PathRequestEntry entry, NavigationConfig config,
+                                         EntityCommandBuffer ecb)
+        {
+            // Build a sorted list of loaded chunk coords for stable indexing
+            var chunkCoords = new NativeList<int2>(_chunkBlobMap.Count, Allocator.Temp);
+            var chunkIndexMap = new NativeHashMap<int2, int>(_chunkBlobMap.Count, Allocator.Temp);
+            foreach (var kvp in _chunkBlobMap)
+            {
+                chunkIndexMap[kvp.Key] = chunkCoords.Length;
+                chunkCoords.Add(kvp.Key);
+            }
+
+            int cellCount = config.ChunkCellCount;
+            int cellsPerChunk = cellCount * cellCount;
+
+            int2 startChunk = ChunkManagerSystem.WorldToChunkCoord(entry.Request.Start, config);
+            int2 endChunk = ChunkManagerSystem.WorldToChunkCoord(entry.Request.End, config);
+
+            if (!chunkIndexMap.TryGetValue(startChunk, out int startChunkIdx) ||
+                !chunkIndexMap.TryGetValue(endChunk, out int endChunkIdx))
+            {
+                ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
+                chunkCoords.Dispose();
+                chunkIndexMap.Dispose();
+                return;
+            }
+
+            int2 startLocal = ChunkManagerSystem.WorldToCellLocal(entry.Request.Start, startChunk, config);
+            int2 endLocal = ChunkManagerSystem.WorldToCellLocal(entry.Request.End, endChunk, config);
+            startLocal = math.clamp(startLocal, int2.zero, new int2(cellCount - 1, cellCount - 1));
+            endLocal = math.clamp(endLocal, int2.zero, new int2(cellCount - 1, cellCount - 1));
+
+            int startGlobal = startChunkIdx * cellsPerChunk + ChunkManagerSystem.CellLocalToIndex(startLocal, cellCount);
+            int endGlobal = endChunkIdx * cellsPerChunk + ChunkManagerSystem.CellLocalToIndex(endLocal, cellCount);
+
+            int totalCells = chunkCoords.Length * cellsPerChunk;
+
+            var gCosts = new NativeArray<int>(totalCells, Allocator.Temp);
+            var parents = new NativeArray<int>(totalCells, Allocator.Temp);
+            var inClosed = new NativeArray<bool>(totalCells, Allocator.Temp);
+            var openHeap = new NativeList<MultiChunkHeapEntry>(512, Allocator.Temp);
+
+            for (int i = 0; i < totalCells; i++) { gCosts[i] = int.MaxValue; parents[i] = -1; }
+
+            // Snap start/end to walkable
+            int snappedStart = SnapToWalkableGlobal(startGlobal, startChunkIdx, startLocal,
+                cellCount, cellsPerChunk, chunkCoords, chunkIndexMap);
+            int snappedEnd = SnapToWalkableGlobal(endGlobal, endChunkIdx, endLocal,
+                cellCount, cellsPerChunk, chunkCoords, chunkIndexMap);
+
+            if (snappedStart < 0 || snappedEnd < 0 || snappedStart == snappedEnd)
+            {
+                ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
+                goto Cleanup;
+            }
+
+            gCosts[snappedStart] = 0;
+            int2 startLocalSnapped = new int2((snappedStart % cellsPerChunk) % cellCount,
+                                              (snappedStart % cellsPerChunk) / cellCount);
+            int2 endLocalSnapped = new int2((snappedEnd % cellsPerChunk) % cellCount,
+                                              (snappedEnd % cellsPerChunk) / cellCount);
+            int2 endChunkSnapped = chunkCoords[snappedEnd / cellsPerChunk];
+
+            int startH = MultiChunkHeuristic(snappedStart, snappedEnd, cellCount, cellsPerChunk, chunkCoords, config);
+            MultiHeapPush(ref openHeap, new MultiChunkHeapEntry { GlobalIdx = snappedStart, FCost = startH, HCost = startH });
+
+            bool found = false;
+
+            while (openHeap.Length > 0)
+            {
+                var current = MultiHeapPop(ref openHeap);
+                int curGlobal = current.GlobalIdx;
+                if (inClosed[curGlobal]) continue;
+                inClosed[curGlobal] = true;
+                if (curGlobal == snappedEnd) { found = true; break; }
+
+                int curChunkIdx = curGlobal / cellsPerChunk;
+                int curLocalIdx = curGlobal % cellsPerChunk;
+                int2 curLocal = new int2(curLocalIdx % cellCount, curLocalIdx / cellCount);
+                int2 curChunk = chunkCoords[curChunkIdx];
+                ref ChunkStaticBlob curBlob = ref _chunkBlobMap[curChunk].Value;
+
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        if (dx == 0 && dz == 0) continue;
+
+                        int2 nLocal = curLocal + new int2(dx, dz);
+                        int2 nChunk = curChunk;
+                        int nChunkIdx = curChunkIdx;
+
+                        // Cross chunk boundary
+                        if (nLocal.x < 0) { nLocal.x += cellCount; nChunk.x--; }
+                        else if (nLocal.x >= cellCount) { nLocal.x -= cellCount; nChunk.x++; }
+                        if (nLocal.y < 0) { nLocal.y += cellCount; nChunk.y--; }
+                        else if (nLocal.y >= cellCount) { nLocal.y -= cellCount; nChunk.y++; }
+
+                        if (!math.all(nChunk == curChunk))
+                        {
+                            if (!chunkIndexMap.TryGetValue(nChunk, out nChunkIdx)) continue;
+                        }
+
+                        int nLocalIdx = ChunkManagerSystem.CellLocalToIndex(nLocal, cellCount);
+                        int nGlobal = nChunkIdx * cellsPerChunk + nLocalIdx;
+                        if (inClosed[nGlobal]) continue;
+
+                        ref ChunkStaticBlob nBlob = ref _chunkBlobMap[nChunk].Value;
+                        if (nBlob.Nodes[nLocalIdx].WalkableLayerMask == 0) continue;
+                        if (nBlob.Nodes[nLocalIdx].SlopeFlags == 1 && entry.Permissions.IsFlying == 0) continue;
+                        if ((nBlob.Nodes[nLocalIdx].WalkableLayerMask & entry.Permissions.WalkableLayers) == 0) continue;
+
+                        int terrainCost = nBlob.Nodes[nLocalIdx].TerrainCostMask == 0 ? 10 : 20;
+                        int moveCost = (dx != 0 && dz != 0) ? 14 : 10;
+                        int tentativeG = gCosts[curGlobal] + moveCost + terrainCost - 10;
+
+                        if (tentativeG < gCosts[nGlobal])
+                        {
+                            gCosts[nGlobal] = tentativeG;
+                            parents[nGlobal] = curGlobal;
+                            int h = MultiChunkHeuristic(nGlobal, snappedEnd, cellCount, cellsPerChunk, chunkCoords, config);
+                            MultiHeapPush(ref openHeap, new MultiChunkHeapEntry
+                            { GlobalIdx = nGlobal, FCost = tentativeG + h, HCost = h });
+                        }
+                    }
+            }
+
+            if (found)
+            {
+                // Reconstruct path
+                var raw = new NativeList<int>(256, Allocator.Temp);
+                int cur = snappedEnd;
+                int safety = 0;
+                while (cur != snappedStart && safety++ < 50000)
+                {
+                    raw.Add(cur);
+                    cur = parents[cur];
+                    if (cur < 0) break;
+                }
+
+                var buffer = EntityManager.GetBuffer<PathWaypoint>(entry.Entity);
+                buffer.Clear();
+
+                for (int i = raw.Length - 1; i >= 0; i--)
+                {
+                    int g = raw[i];
+                    int ci = g / cellsPerChunk;
+                    int li = g % cellsPerChunk;
+                    int2 lc = new int2(li % cellCount, li / cellCount);
+                    int2 cc = chunkCoords[ci];
+                    float chunkSize = cellCount * config.CellSize;
+                    float3 wp = new float3(
+                        cc.x * chunkSize + (lc.x + 0.5f) * config.CellSize,
+                        0f,
+                        cc.y * chunkSize + (lc.y + 0.5f) * config.CellSize);
+                    buffer.Add(new PathWaypoint { Position = wp });
+                }
+
+                // Final destination — validate walkability
+                int2 endWC = new int2(
+                    (int)math.floor((entry.Request.End.x - endChunkSnapped.x * (float)(cellCount * config.CellSize)) / config.CellSize),
+                    (int)math.floor((entry.Request.End.z - endChunkSnapped.y * (float)(cellCount * config.CellSize)) / config.CellSize));
+                endWC = math.clamp(endWC, int2.zero, new int2(cellCount - 1, cellCount - 1));
+                int endWIdx = ChunkManagerSystem.CellLocalToIndex(endWC, cellCount);
+                ref ChunkStaticBlob endBlob2 = ref _chunkBlobMap[endChunkSnapped].Value;
+                bool endWalkable = endBlob2.Nodes[endWIdx].WalkableLayerMask != 0;
+
+                int2 snappedEndLocal = new int2((snappedEnd % cellsPerChunk) % cellCount,
+                                                (snappedEnd % cellsPerChunk) / cellCount);
+                int2 snappedEndChunk = chunkCoords[snappedEnd / cellsPerChunk];
+                float snappedChunkSize = cellCount * config.CellSize;
+                float3 snappedEndWorld = new float3(
+                    snappedEndChunk.x * snappedChunkSize + (snappedEndLocal.x + 0.5f) * config.CellSize,
+                    0f,
+                    snappedEndChunk.y * snappedChunkSize + (snappedEndLocal.y + 0.5f) * config.CellSize);
+
+                buffer.Add(new PathWaypoint { Position = endWalkable ? entry.Request.End : snappedEndWorld });
+                ecb.SetComponentEnabled<PathfindingSuccess>(entry.Entity, true);
+                raw.Dispose();
+            }
+            else
+            {
+                var buffer = EntityManager.GetBuffer<PathWaypoint>(entry.Entity);
+                buffer.Clear();
+                ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
+            }
+
+        Cleanup:
+            gCosts.Dispose();
+            parents.Dispose();
+            inClosed.Dispose();
+            openHeap.Dispose();
+            chunkCoords.Dispose();
+            chunkIndexMap.Dispose();
+        }
+
+        private int SnapToWalkableGlobal(int globalIdx, int chunkIdx, int2 localCell,
+            int cellCount, int cellsPerChunk,
+            NativeList<int2> chunkCoords, NativeHashMap<int2, int> chunkIndexMap)
+        {
+            int2 chunkCoord = chunkCoords[chunkIdx];
+            if (!_chunkBlobMap.TryGetValue(chunkCoord, out var blob)) return -1;
+            ref ChunkStaticBlob b = ref blob.Value;
+
+            if (b.Nodes[globalIdx % cellsPerChunk].WalkableLayerMask != 0) return globalIdx;
+
+            // BFS outward
+            var queue = new NativeList<int2>(32, Allocator.Temp);
+            var visited = new NativeHashSet<int>(64, Allocator.Temp);
+            queue.Add(localCell);
+            visited.Add(globalIdx);
+            int head = 0, result = -1;
+
+            while (head < queue.Length)
+            {
+                int2 cur = queue[head++];
+                int2 d = math.abs(cur - localCell);
+                if (math.max(d.x, d.y) > 4) break;
+
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        if (dx == 0 && dz == 0) continue;
+                        int2 n = cur + new int2(dx, dz);
+                        int2 nc = chunkCoord;
+                        int nci = chunkIdx;
+                        if (n.x < 0) { n.x += cellCount; nc.x--; }
+                        else if (n.x >= cellCount) { n.x -= cellCount; nc.x++; }
+                        if (n.y < 0) { n.y += cellCount; nc.y--; }
+                        else if (n.y >= cellCount) { n.y -= cellCount; nc.y++; }
+                        if (!math.all(nc == chunkCoord) && !chunkIndexMap.TryGetValue(nc, out nci)) continue;
+                        int nli = ChunkManagerSystem.CellLocalToIndex(n, cellCount);
+                        int ng = nci * cellsPerChunk + nli;
+                        if (visited.Contains(ng)) continue;
+                        visited.Add(ng);
+                        if (!_chunkBlobMap.TryGetValue(nc, out var nb)) continue;
+                        if (nb.Value.Nodes[nli].WalkableLayerMask != 0) { result = ng; goto BFSDone; }
+                        queue.Add(n);
+                    }
+            }
+        BFSDone:
+            queue.Dispose();
+            visited.Dispose();
+            return result;
+        }
+
+        private int MultiChunkHeuristic(int aGlobal, int bGlobal, int cellCount, int cellsPerChunk,
+            NativeList<int2> chunkCoords, NavigationConfig config)
+        {
+            int aci = aGlobal / cellsPerChunk, ali = aGlobal % cellsPerChunk;
+            int bci = bGlobal / cellsPerChunk, bli = bGlobal % cellsPerChunk;
+            int2 ac = chunkCoords[aci], bc = chunkCoords[bci];
+            int2 al = new int2(ali % cellCount, ali / cellCount);
+            int2 bl = new int2(bli % cellCount, bli / cellCount);
+            // Convert to global cell coords for heuristic
+            int2 ag = ac * cellCount + al;
+            int2 bg = bc * cellCount + bl;
+            int2 d = math.abs(ag - bg);
+            return 10 * math.max(d.x, d.y) + 4 * math.min(d.x, d.y);
+        }
+
+        private struct MultiChunkHeapEntry { public int GlobalIdx; public int FCost; public int HCost; }
+
+        private void MultiHeapPush(ref NativeList<MultiChunkHeapEntry> heap, MultiChunkHeapEntry e)
+        {
+            heap.Add(e);
+            int i = heap.Length - 1;
+            while (i > 0)
+            {
+                int p = (i - 1) / 2;
+                if (heap[p].FCost <= heap[i].FCost) break;
+                var tmp = heap[p]; heap[p] = heap[i]; heap[i] = tmp;
+                i = p;
+            }
+        }
+
+        private MultiChunkHeapEntry MultiHeapPop(ref NativeList<MultiChunkHeapEntry> heap)
+        {
+            var top = heap[0]; int last = heap.Length - 1;
+            heap[0] = heap[last]; heap.RemoveAt(last);
+            int i = 0;
+            while (true)
+            {
+                int l = 2 * i + 1, r = 2 * i + 2, s = i;
+                if (l < heap.Length && heap[l].FCost < heap[s].FCost) s = l;
+                if (r < heap.Length && heap[r].FCost < heap[s].FCost) s = r;
+                if (s == i) break;
+                var tmp = heap[i]; heap[i] = heap[s]; heap[s] = tmp; i = s;
+            }
+            return top;
+        }
+
         private static float3 ClampWorldPosToChunk(float3 worldPos, int2 chunkCoord,
                                                     NavigationConfig config)
         {
@@ -140,9 +412,6 @@ namespace Navigation.ECS
                 math.clamp(worldPos.z, origin.z + half, origin.z + size - half));
         }
 
-        /// <summary>
-        /// Runs AStarSingleChunkJob and writes results to the agent's PathWaypoint buffer.
-        /// </summary>
         private void RunAStarInChunk(PathRequestEntry entry, NavigationConfig config,
                                       int2 chunkCoord, BlobAssetReference<ChunkStaticBlob> blob,
                                       float3 startWorld, float3 endWorld,
@@ -171,6 +440,10 @@ namespace Navigation.ECS
             }
             else
             {
+                // Clear stale waypoints so the unit does not keep following the old
+                // path (which may cross walls) after a failed repath.
+                var buffer = EntityManager.GetBuffer<PathWaypoint>(entry.Entity);
+                buffer.Clear();
                 ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
             }
             pathOut.Dispose();
@@ -198,10 +471,6 @@ namespace Navigation.ECS
             for (int i = 0; i < macroPath.Length; i++)
             {
                 int2 coord = macroPath[i];
-
-                // Skip the start chunk — the agent is already inside it.
-                // Including it sends the agent to the chunk centre (32,32) before
-                // heading toward the destination, causing large wrong-direction detours.
                 if (math.all(coord == startChunk)) continue;
 
                 float3 entryPoint = new float3(
@@ -209,18 +478,13 @@ namespace Navigation.ECS
                     0f,
                     coord.y * chunkWorldSize + chunkWorldSize * 0.5f);
 
-                macroBuffer.Add(new MacroWaypoint
-                {
-                    ChunkCoord = coord,
-                    WorldEntryPoint = entryPoint
-                });
+                macroBuffer.Add(new MacroWaypoint { ChunkCoord = coord, WorldEntryPoint = entryPoint });
             }
 
             var nav = EntityManager.GetComponentData<AgentNavigation>(entry.Entity);
             nav.Mode = NavMode.MacroOnly;
             ecb.SetComponent(entry.Entity, nav);
             ecb.SetComponentEnabled<PathfindingSuccess>(entry.Entity, true);
-
             macroPath.Dispose();
         }
 
@@ -239,7 +503,6 @@ namespace Navigation.ECS
 
             while (openSet.Length > 0)
             {
-                // Find lowest F
                 int lowestIdx = 0;
                 for (int i = 1; i < openSet.Length; i++)
                     if (openSet[i].FCost < openSet[lowestIdx].FCost) lowestIdx = i;
@@ -256,26 +519,23 @@ namespace Navigation.ECS
 
                 closedSet.Add(current.Coord);
 
-                // 8 neighbours
                 for (int dx = -1; dx <= 1; dx++)
                 {
                     for (int dz = -1; dz <= 1; dz++)
                     {
                         if (dx == 0 && dz == 0) continue;
                         int2 neighbour = current.Coord + new int2(dx, dz);
-
                         if (closedSet.Contains(neighbour)) continue;
 
-                        // Check macro connectivity if chunk is loaded
-                        byte edgeCost = 10; // Default passable
+                        byte edgeCost = 10;
                         if (_chunkBlobMap.TryGetValue(current.Coord, out var blob))
                         {
                             int dirIdx = DirectionToIndex(dx, dz);
                             edgeCost = blob.Value.MacroConnectivity[dirIdx];
                         }
-                        if (edgeCost == 0) continue; // Blocked
+                        if (edgeCost == 0) continue;
 
-                        int moveCost = (dx != 0 && dz != 0) ? 14 : 10; // Diagonal vs straight
+                        int moveCost = (dx != 0 && dz != 0) ? 14 : 10;
                         int tentativeG = current.GCost + moveCost;
 
                         if (!gCosts.TryGetValue(neighbour, out int existingG) || tentativeG < existingG)
@@ -325,12 +585,11 @@ namespace Navigation.ECS
         private static int MacroHeuristic(int2 a, int2 b)
         {
             int2 d = math.abs(a - b);
-            return 10 * (d.x + d.y) + (14 - 20) * math.min(d.x, d.y); // Octile
+            return 10 * (d.x + d.y) + (14 - 20) * math.min(d.x, d.y);
         }
 
         private static int DirectionToIndex(int dx, int dz)
         {
-            // N=0, NE=1, E=2, SE=3, S=4, SW=5, W=6, NW=7
             if (dz == 1 && dx == 0) return 0;
             if (dz == 1 && dx == 1) return 1;
             if (dz == 0 && dx == 1) return 2;
@@ -338,10 +597,8 @@ namespace Navigation.ECS
             if (dz == -1 && dx == 0) return 4;
             if (dz == -1 && dx == -1) return 5;
             if (dz == 0 && dx == -1) return 6;
-            return 7; // NW
+            return 7;
         }
-
-        // ── Inner structs ──────────────────────────────────────────────
 
         private struct PathRequestEntry
         {
@@ -365,10 +622,6 @@ namespace Navigation.ECS
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // BURST COMPILED A* JOB — single chunk
-    // ─────────────────────────────────────────────────────────────────────────
-
     [BurstCompile]
     public struct AStarSingleChunkJob
     {
@@ -389,32 +642,33 @@ namespace Navigation.ECS
             int2 startLocal = ChunkManagerSystem.WorldToCellLocal(StartWorld, ChunkCoord, Config);
             int2 endLocal = ChunkManagerSystem.WorldToCellLocal(EndWorld, ChunkCoord, Config);
 
-            // Clamp to chunk bounds
             startLocal = math.clamp(startLocal, int2.zero, new int2(cellCount - 1, cellCount - 1));
             endLocal = math.clamp(endLocal, int2.zero, new int2(cellCount - 1, cellCount - 1));
 
             int startIdx = ChunkManagerSystem.CellLocalToIndex(startLocal, cellCount);
             int endIdx = ChunkManagerSystem.CellLocalToIndex(endLocal, cellCount);
 
-            if (startIdx == endIdx) return; // Already there
+            if (startIdx == endIdx) return;
 
-            // Validate start/end walkability
-            if (!IsWalkable(ref blob, startIdx, Permissions)) return;
-            if (!IsWalkable(ref blob, endIdx, Permissions)) return;
+            // FIX: If start or end is unwalkable, snap to nearest walkable cell.
+            // Previously returning early here caused agents in/near wall cells
+            // to never get a path at all, then DispatchSystem re-issued endlessly.
+            startIdx = FindNearestWalkable(ref blob, startIdx, startLocal, cellCount, Permissions);
+            endIdx = FindNearestWalkable(ref blob, endIdx, endLocal, cellCount, Permissions);
+            if (startIdx < 0 || endIdx < 0 || startIdx == endIdx) return;
 
-            // A* data arrays — Temp alloc, dies when job finishes
             var gCosts = new NativeArray<int>(total, Allocator.Temp);
             var parents = new NativeArray<int>(total, Allocator.Temp);
             var inClosed = new NativeArray<bool>(total, Allocator.Temp);
-
-            // Min-heap open set (index, FCost)
             var openHeap = new NativeList<HeapEntry>(256, Allocator.Temp);
 
-            // Init
             for (int i = 0; i < total; i++) { gCosts[i] = int.MaxValue; parents[i] = -1; }
             gCosts[startIdx] = 0;
 
-            int startH = Heuristic(startLocal, endLocal);
+            int2 startLocalSnapped = IndexToLocal(startIdx, cellCount);
+            int2 endLocalSnapped = IndexToLocal(endIdx, cellCount);
+
+            int startH = Heuristic(startLocalSnapped, endLocalSnapped);
             HeapPush(ref openHeap, new HeapEntry { Index = startIdx, FCost = startH, HCost = startH });
 
             bool found = false;
@@ -431,7 +685,6 @@ namespace Navigation.ECS
 
                 int2 curLocal = IndexToLocal(curIdx, cellCount);
 
-                // Neighbours — 2D (8) for ground, 3D skipped (same chunk = 2D always)
                 for (int dx = -1; dx <= 1; dx++)
                 {
                     for (int dz = -1; dz <= 1; dz++)
@@ -446,16 +699,15 @@ namespace Navigation.ECS
                         if (inClosed[nIdx]) continue;
                         if (!IsWalkable(ref blob, nIdx, Permissions)) continue;
 
-                        // Terrain cost from lookup
                         int terrainCost = blob.Nodes[nIdx].TerrainCostMask == 0 ? 10 : 20;
                         int moveCost = (dx != 0 && dz != 0) ? 14 : 10;
-                        int tentativeG = gCosts[curIdx] + moveCost + terrainCost - 10; // subtract base
+                        int tentativeG = gCosts[curIdx] + moveCost + terrainCost - 10;
 
                         if (tentativeG < gCosts[nIdx])
                         {
                             gCosts[nIdx] = tentativeG;
                             parents[nIdx] = curIdx;
-                            int h = Heuristic(nLocal, endLocal);
+                            int h = Heuristic(nLocal, endLocalSnapped);
                             HeapPush(ref openHeap, new HeapEntry
                             {
                                 Index = nIdx,
@@ -468,7 +720,21 @@ namespace Navigation.ECS
             }
 
             if (found)
-                ReconstructPath(startIdx, endIdx, parents, cellCount, ref PathOut);
+            {
+                // Compute final destination here where blob is in scope.
+                // If EndWorld falls in a walkable cell use it exactly;
+                // otherwise use the snapped endIdx cell centre so the unit
+                // stops at the wall edge instead of walking through it.
+                ref ChunkStaticBlob blobRef = ref Blob.Value;
+                int2 endWorldCell = new int2(
+                    (int)math.floor((EndWorld.x - ChunkCoord.x * (float)(Config.ChunkCellCount * Config.CellSize)) / Config.CellSize),
+                    (int)math.floor((EndWorld.z - ChunkCoord.y * (float)(Config.ChunkCellCount * Config.CellSize)) / Config.CellSize));
+                endWorldCell = math.clamp(endWorldCell, int2.zero, new int2(cellCount - 1, cellCount - 1));
+                int endWorldIdx = ChunkManagerSystem.CellLocalToIndex(endWorldCell, cellCount);
+                bool endWorldWalkable = IsWalkable(ref blobRef, endWorldIdx, Permissions);
+                float3 finalDest = endWorldWalkable ? EndWorld : CellLocalToWorld(IndexToLocal(endIdx, cellCount));
+                ReconstructPath(startIdx, endIdx, parents, cellCount, finalDest, ref PathOut);
+            }
 
             gCosts.Dispose();
             parents.Dispose();
@@ -476,17 +742,70 @@ namespace Navigation.ECS
             openHeap.Dispose();
         }
 
-        // ── Helpers ─────────────────────────────────────────────────────
+        /// <summary>
+        /// If the given cell is unwalkable, BFS outward to find the nearest walkable one.
+        /// Returns -1 if none found within a reasonable radius.
+        /// This prevents A* from silently failing when agents are nudged into wall cells
+        /// by formation offsets or physics.
+        /// </summary>
+        private int FindNearestWalkable(ref ChunkStaticBlob blob, int idx, int2 local,
+                                         int cellCount, UnitLayerPermissions perms)
+        {
+            if (IsWalkable(ref blob, idx, perms)) return idx;
+
+            // BFS up to radius 4
+            var queue = new NativeList<int2>(32, Allocator.Temp);
+            var visited = new NativeArray<bool>(cellCount * cellCount, Allocator.Temp);
+            queue.Add(local);
+            visited[idx] = true;
+            int head = 0;
+            int result = -1;
+
+            while (head < queue.Length)
+            {
+                int2 cur = queue[head++];
+                int2 d = math.abs(cur - local);
+                if (math.max(d.x, d.y) > 4) break; // radius limit
+
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        if (dx == 0 && dz == 0) continue;
+                        int2 n = cur + new int2(dx, dz);
+                        if (n.x < 0 || n.x >= cellCount || n.y < 0 || n.y >= cellCount) continue;
+                        int nIdx = ChunkManagerSystem.CellLocalToIndex(n, cellCount);
+                        if (visited[nIdx]) continue;
+                        visited[nIdx] = true;
+                        if (IsWalkable(ref blob, nIdx, perms)) { result = nIdx; goto Done; }
+                        queue.Add(n);
+                    }
+                }
+            }
+        Done:
+            queue.Dispose();
+            visited.Dispose();
+            return result;
+        }
 
         private bool IsWalkable(ref ChunkStaticBlob blob, int idx, UnitLayerPermissions perms)
         {
-            return (blob.Nodes[idx].WalkableLayerMask & perms.WalkableLayers) != 0;
+            // FIX: WalkableLayerMask == 0 means blocked (wall or no ground).
+            // Any non-zero value masked against unit permissions determines access.
+            // Previously slope-blocked nodes (WalkableLayerMask = 0b00000010) were
+            // correctly handled here but only if perms.WalkableLayers included bit 1.
+            // Ground units have WalkableLayers = 0xFF so slopes still block them
+            // via SlopeFlags check below.
+            byte mask = blob.Nodes[idx].WalkableLayerMask;
+            if (mask == 0) return false;
+            // Slope-blocked nodes have SlopeFlags = 1 — ground units cannot enter them
+            if (blob.Nodes[idx].SlopeFlags == 1 && perms.IsFlying == 0) return false;
+            return (mask & perms.WalkableLayers) != 0;
         }
 
         private int Heuristic(int2 a, int2 b)
         {
             int2 d = math.abs(a - b);
-            // Octile distance * 10
             int straight = math.max(d.x, d.y);
             int diag = math.min(d.x, d.y);
             return 10 * straight + 4 * diag;
@@ -496,7 +815,8 @@ namespace Navigation.ECS
             => new int2(idx % cellCount, idx / cellCount);
 
         private void ReconstructPath(int startIdx, int endIdx, NativeArray<int> parents,
-                                      int cellCount, ref NativeList<float3> pathOut)
+                                      int cellCount, float3 finalDestination,
+                                      ref NativeList<float3> pathOut)
         {
             var raw = new NativeList<int>(128, Allocator.Temp);
             int current = endIdx;
@@ -509,50 +829,29 @@ namespace Navigation.ECS
                 if (current < 0) break;
             }
 
-            // Simplify: skip collinear nodes
-            int2 prevDir = int2.zero;
+            // FIX: Removed collinear-node simplification. That optimisation deleted
+            // waypoints at wall corners, causing the unit to walk the straight line
+            // from the previous kept waypoint to the next, which cuts through walls.
+            // All cell-centre waypoints are now kept — the path is already optimal.
             for (int i = raw.Length - 1; i >= 0; i--)
             {
                 int2 cellLocal = IndexToLocal(raw[i], cellCount);
-
-                if (i < raw.Length - 1)
-                {
-                    int2 nextLocal = IndexToLocal(raw[i + 1], cellCount);
-                    int2 dir = cellLocal - nextLocal;
-                    if (math.all(dir == prevDir) && i > 0) { prevDir = dir; continue; }
-                    prevDir = dir;
-                }
-
-                float3 worldPos = CellLocalToWorld(cellLocal);
-                pathOut.Add(worldPos);
+                pathOut.Add(CellLocalToWorld(cellLocal));
             }
 
-            // Always add exact destination
-            pathOut.Add(EndWorld);
+            // finalDestination is pre-validated in Execute() to be walkable.
+            pathOut.Add(finalDestination);
             raw.Dispose();
         }
 
         private float3 CellLocalToWorld(int2 localCell)
         {
             float chunkWorldSize = Config.ChunkCellCount * Config.CellSize;
-            float3 chunkOrigin = new float3(
-                ChunkCoord.x * chunkWorldSize, 0,
-                ChunkCoord.y * chunkWorldSize);
-
-            return chunkOrigin + new float3(
-                (localCell.x + 0.5f) * Config.CellSize,
-                0f,
-                (localCell.y + 0.5f) * Config.CellSize);
+            float3 chunkOrigin = new float3(ChunkCoord.x * chunkWorldSize, 0, ChunkCoord.y * chunkWorldSize);
+            return chunkOrigin + new float3((localCell.x + 0.5f) * Config.CellSize, 0f, (localCell.y + 0.5f) * Config.CellSize);
         }
 
-        // ── Binary min-heap ─────────────────────────────────────────────
-
-        private struct HeapEntry
-        {
-            public int Index;
-            public int FCost;
-            public int HCost;
-        }
+        private struct HeapEntry { public int Index; public int FCost; public int HCost; }
 
         private void HeapPush(ref NativeList<HeapEntry> heap, HeapEntry entry)
         {
@@ -573,7 +872,6 @@ namespace Navigation.ECS
             int last = heap.Length - 1;
             heap[0] = heap[last];
             heap.RemoveAt(last);
-
             int i = 0;
             while (true)
             {

@@ -15,7 +15,7 @@ namespace Navigation.ECS
     [UpdateAfter(typeof(AStarSystem))]
     public partial class FlowFieldSystem : SystemBase
     {
-        private const float FieldExpiry = 30f;
+        private const float FieldExpiry = 5f; // Reduced so fields rebuild quickly after bake changes
         private NativeHashMap<ulong, Entity> _fieldRegistry;
 
         protected override void OnCreate()
@@ -241,6 +241,9 @@ namespace Navigation.ECS
             queue.Dispose();
 
             // Phase 3: Gradient → direction vectors
+            // FIX: Only consider walkable neighbours when computing gradient direction.
+            // Previously unwalkable neighbours could have lower integration costs
+            // (from being adjacent to the goal) causing vectors to point into walls.
             for (int idx = 0; idx < total; idx++)
             {
                 if (Integration[idx] == int.MaxValue) { Vectors[idx] = float2.zero; continue; }
@@ -255,6 +258,8 @@ namespace Navigation.ECS
                         int2 n = local + new int2(dx, dz);
                         if (n.x < 0 || n.x >= cellCount || n.y < 0 || n.y >= cellCount) continue;
                         int nIdx = ChunkManagerSystem.CellLocalToIndex(n, cellCount);
+                        // FIX: skip unwalkable neighbours — vectors must never point into walls
+                        if (blob.Nodes[nIdx].WalkableLayerMask == 0) continue;
                         if (Integration[nIdx] < bestCost)
                         { bestCost = Integration[nIdx]; bestDir = math.normalize(new float2(dx, dz)); }
                     }

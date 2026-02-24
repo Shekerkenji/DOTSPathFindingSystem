@@ -85,6 +85,7 @@ namespace Navigation.ECS
 
             void Execute([ChunkIndexInQuery] int sortKey, Entity entity,
                          ref AgentNavigation nav,
+                         ref UnitMovement movement,
                          in NavigationMoveCommand cmd,
                          EnabledRefRO<NavigationMoveCommand> cmdEnabled,
                          in LocalTransform transform)
@@ -94,6 +95,7 @@ namespace Navigation.ECS
                 nav.HasDestination = 1;
                 nav.Mode = NavMode.AStar;
                 nav.RepathCooldown = 0f;
+                nav.MacroPathDone = 0;
 
                 // Issue path request
                 ECBWriter.SetComponentEnabled<PathRequest>(sortKey, entity, true);

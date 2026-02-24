@@ -59,7 +59,11 @@ namespace Navigation.ECS
 
                 // ── Arrival ────────────────────────────────────────────────
                 float distToDest = math.distance(transform.ValueRO.Position, nav.ValueRO.Destination);
-                if (distToDest <= nav.ValueRO.ArrivalThreshold)
+                // Use a slightly larger arrival threshold to account for destination being
+                // snapped away from the exact click point (e.g. click on wall snaps to
+                // nearest walkable cell centre which may be >ArrivalThreshold from click).
+                float effectiveArrival = math.max(nav.ValueRO.ArrivalThreshold, 1.5f);
+                if (distToDest <= effectiveArrival)
                 {
                     nav.ValueRW.HasDestination = 0;
                     nav.ValueRW.Mode = NavMode.Idle;

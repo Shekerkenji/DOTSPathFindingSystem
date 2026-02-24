@@ -178,9 +178,21 @@ namespace Navigation.ECS
             else
             { node.SlopeFlags = 0; node.WalkableLayerMask = 0b11111111; }
 
-            // Explicit Vector3 for Physics.CheckSphere
-            var overlapCentre = new Vector3(hit.point.x, hit.point.y + config.AgentRadius, hit.point.z);
-            if (Physics.CheckSphere(overlapCentre, config.AgentRadius * 0.9f, config.UnwalkablePhysicsLayer))
+            // FIX: Use CheckBox covering the full cell footprint + agent radius erosion,
+            // not just a small sphere at the cell center.
+            // With CellSize=1 and walls=0.6, a CheckSphere(r=0.45) misses wall edges
+            // whose collider doesn't overlap the cell center. CheckBox with half-extents
+            // of (cellHalf + agentRadius) catches any obstacle touching the cell boundary.
+            float cellHalf = config.CellSize * 0.5f;
+            // Erode by agent radius so nodes within AgentRadius of a wall are also blocked.
+            float boxHalf = cellHalf + config.AgentRadius;
+            // FIX: Check a tall box (2 units high) starting at ground level so walls
+            // of any reasonable height are caught. Previous height of agentRadius (0.5)
+            // only checked a thin slice at ground level, missing walls that start at y=0.
+            float boxCheckHeight = 1f;
+            var boxCenter = new Vector3(hit.point.x, hit.point.y + boxCheckHeight, hit.point.z);
+            var halfExtents = new Vector3(boxHalf, boxCheckHeight, boxHalf);
+            if (Physics.CheckBox(boxCenter, halfExtents, Quaternion.identity, config.UnwalkablePhysicsLayer))
                 node.WalkableLayerMask = 0;
 
             node.TerrainCostMask = 0;

@@ -7,7 +7,6 @@ using Unity.Transforms;
 namespace Navigation.ECS
 {
     [UpdateInGroup(typeof(SimulationSystemGroup))]
-    [BurstCompile]
     public partial struct UnitMovementSystem : ISystem
     {
         [BurstCompile]
@@ -34,9 +33,22 @@ namespace Navigation.ECS
             var macroJob = new FollowMacroPathJob { DeltaTime = dt };
             state.Dependency = macroJob.ScheduleParallel(state.Dependency);
 
-            // Flow field followers
-            var flowJob = new FollowFlowFieldJob { DeltaTime = dt, Config = config };
+            // Flow field followers — directions pre-sampled by FlowFieldSamplerSystem.
+            // Read the static BEFORE scheduling (we are on the main thread here;
+            // the job receives the NativeHashMap by value so Burst never touches the static).
+            var sampledDirs = FlowFieldSamplerSystem.SampledDirections;
+            bool sampledValid = sampledDirs.IsCreated;
+            var emptyDirs = sampledValid
+                ? default(NativeHashMap<Entity, float2>)
+                : new NativeHashMap<Entity, float2>(0, Allocator.TempJob);
+            var flowJob = new FollowFlowFieldJob
+            {
+                DeltaTime = dt,
+                Config = config,
+                SampledDirections = sampledValid ? sampledDirs : emptyDirs
+            };
             state.Dependency = flowJob.ScheduleParallel(state.Dependency);
+            if (!sampledValid) { state.Dependency.Complete(); emptyDirs.Dispose(); }
         }
 
         // ── A* Waypoint Follower ─────────────────────────────────────────
@@ -150,13 +162,19 @@ namespace Navigation.ECS
 
         // ── Flow Field Follower ──────────────────────────────────────────
 
+
+        // FIX: FollowFlowFieldJob now receives sampled directions via a NativeHashMap
+        // keyed by Entity. FlowFieldSamplerSystem (main thread, non-Burst) samples
+        // FlowFieldSystem.TrySampleField each frame and writes results here.
+        // The Burst job reads directions without needing to call managed code.
         [BurstCompile]
         partial struct FollowFlowFieldJob : IJobEntity
         {
             public float DeltaTime;
             public NavigationConfig Config;
+            [ReadOnly] public NativeHashMap<Entity, float2> SampledDirections;
 
-            void Execute(ref LocalTransform transform, ref UnitMovement movement,
+            void Execute(Entity entity, ref LocalTransform transform, ref UnitMovement movement,
                          ref AgentNavigation nav, in FlowFieldFollower follower,
                          EnabledRefRO<FlowFieldFollower> followerEnabled,
                          in UnitLayerPermissions perms)
@@ -166,13 +184,23 @@ namespace Navigation.ECS
                 if (nav.HasDestination == 0) return;
 
                 float3 currentPos = transform.Position;
-                float3 toTarget = nav.Destination - currentPos;
-                float dist = math.length(toTarget);
-
+                float dist = math.distance(currentPos, nav.Destination);
                 if (dist < nav.ArrivalThreshold) return;
 
-                float3 direction = toTarget / dist;
-                if (perms.IsFlying == 0) direction.y = 0;
+                // Use sampled flow field direction if available, else fall back to direct
+                float3 direction;
+                if (SampledDirections.TryGetValue(entity, out float2 fieldDir) &&
+                    math.lengthsq(fieldDir) > 0.001f)
+                {
+                    direction = new float3(fieldDir.x, 0f, fieldDir.y);
+                }
+                else
+                {
+                    // Fallback: steer directly — field not ready yet for this chunk
+                    float3 toTarget = nav.Destination - currentPos;
+                    direction = math.normalize(new float3(toTarget.x, 0f, toTarget.z));
+                }
+
                 if (math.lengthsq(direction) < 0.001f) return;
                 direction = math.normalize(direction);
 
@@ -216,6 +244,62 @@ namespace Navigation.ECS
 
             ecb.Playback(state.EntityManager);
             ecb.Dispose();
+        }
+    }
+
+    // ── Flow Field Sampler ───────────────────────────────────────────────────
+    // Runs on main thread (non-Burst) before UnitMovementSystem so it can call
+    // FlowFieldSystem.TrySampleField (managed). Writes results to a static
+    // NativeHashMap that FollowFlowFieldJob reads as a plain data lookup.
+
+    [UpdateInGroup(typeof(SimulationSystemGroup))]
+    [UpdateBefore(typeof(UnitMovementSystem))]
+    [UpdateAfter(typeof(FlowFieldSystem))]
+    public partial class FlowFieldSamplerSystem : SystemBase
+    {
+        public static NativeHashMap<Entity, float2> SampledDirections;
+
+        private FlowFieldSystem _flowFieldSystem;
+
+        protected override void OnCreate()
+        {
+            RequireForUpdate<NavigationConfig>();
+            SampledDirections = new NativeHashMap<Entity, float2>(512, Allocator.Persistent);
+        }
+
+        protected override void OnDestroy()
+        {
+            if (SampledDirections.IsCreated) SampledDirections.Dispose();
+        }
+
+        protected override void OnStartRunning()
+        {
+            _flowFieldSystem = World.GetExistingSystemManaged<FlowFieldSystem>();
+        }
+
+        protected override void OnUpdate()
+        {
+            if (_flowFieldSystem == null) return;
+            var config = SystemAPI.GetSingleton<NavigationConfig>();
+
+            SampledDirections.Clear();
+
+            foreach (var (nav, transform, followerEnabled, entity) in
+                SystemAPI.Query<RefRO<AgentNavigation>, RefRO<Unity.Transforms.LocalTransform>,
+                                EnabledRefRO<FlowFieldFollower>>()
+                    .WithEntityAccess())
+            {
+                if (!followerEnabled.ValueRO) continue;
+                if (nav.ValueRO.Mode != NavMode.FlowField) continue;
+                if (nav.ValueRO.HasDestination == 0) continue;
+
+                ulong destHash = FlowFieldSystem.DestinationHash(nav.ValueRO.Destination, config);
+                if (_flowFieldSystem.TrySampleField(destHash, transform.ValueRO.Position,
+                        config, out float2 dir))
+                {
+                    SampledDirections[entity] = dir;
+                }
+            }
         }
     }
 }
