@@ -1,4 +1,4 @@
-using Unity.Entities;
+﻿using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Collections;
 using Unity.Burst;
@@ -7,9 +7,14 @@ using Unity.Transforms;
 namespace Navigation.ECS
 {
     /// <summary>
-    /// Decides A* vs FlowField per agent each frame.
-    /// Routes stuck detection and repath requests.
-    /// Uses SystemAPI.Query throughout � no deprecated Entities.ForEach.
+    /// Decides A* vs FlowField vs MacroOnly per agent each frame.
+    ///
+    /// KEY RULES:
+    /// - MacroOnly is ONLY used when the destination chunk has no static data loaded.
+    ///   For short moves (destination in an adjacent active chunk), A* is used directly.
+    /// - Agents actively following a valid path are not re-evaluated — prevents thrashing.
+    /// - MacroPathDone flag (written by FollowMacroPathJob) triggers final A* request
+    ///   on the main thread, avoiding the BeginSimulationECBSystem.Singleton crash.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(AStarSystem))]
@@ -28,7 +33,14 @@ namespace Navigation.ECS
             float time = (float)SystemAPI.Time.ElapsedTime;
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
-            // 1. Count agents per quantized destination
+            // Build set of chunk coords that have valid static data.
+            // These are the only chunks A* can pathfind inside.
+            var readyChunks = new NativeHashSet<int2>(128, Allocator.Temp);
+            foreach (var chunk in SystemAPI.Query<RefRO<GridChunk>>())
+                if (chunk.ValueRO.StaticDataReady == 1)
+                    readyChunks.Add(chunk.ValueRO.ChunkCoord);
+
+            // Count agents per destination for FlowField threshold
             var destCounts = new NativeHashMap<ulong, int>(64, Allocator.Temp);
             foreach (var nav in SystemAPI.Query<RefRO<AgentNavigation>>())
             {
@@ -38,7 +50,6 @@ namespace Navigation.ECS
                 destCounts[key] = count + 1;
             }
 
-            // 2. Assign mode per agent
             foreach (var (nav, movement, transform, perms, entity) in
                 SystemAPI.Query<RefRW<AgentNavigation>, RefRW<UnitMovement>,
                                 RefRO<LocalTransform>, RefRO<UnitLayerPermissions>>()
@@ -46,40 +57,70 @@ namespace Navigation.ECS
             {
                 if (nav.ValueRO.HasDestination == 0) continue;
 
-                // Arrival check
+                // ── Arrival ────────────────────────────────────────────────
                 float distToDest = math.distance(transform.ValueRO.Position, nav.ValueRO.Destination);
                 if (distToDest <= nav.ValueRO.ArrivalThreshold)
                 {
                     nav.ValueRW.HasDestination = 0;
                     nav.ValueRW.Mode = NavMode.Idle;
+                    nav.ValueRW.MacroPathDone = 0;
                     movement.ValueRW.IsFollowingPath = 0;
+                    movement.ValueRW.CurrentWaypointIndex = 0;
                     ecb.SetComponentEnabled<FlowFieldFollower>(entity, false);
                     continue;
                 }
 
-                // Determine desired mode
-                int2 destChunk = ChunkManagerSystem.WorldToChunkCoord(nav.ValueRO.Destination, config);
-                int2 startChunk = ChunkManagerSystem.WorldToChunkCoord(transform.ValueRO.Position, config);
-                bool crossChunk = !math.all(startChunk == destChunk);
+                // ── MacroPathDone handoff ──────────────────────────────────
+                // FollowMacroPathJob sets this when it finishes the chunk corridor.
+                // We issue the final micro A* request here on the main thread.
+                if (nav.ValueRO.MacroPathDone == 1)
+                {
+                    nav.ValueRW.MacroPathDone = 0;
+                    nav.ValueRW.Mode = NavMode.AStar;
+                    movement.ValueRW.IsFollowingPath = 0;
+                    IssuePathRequest(entity, transform.ValueRO.Position,
+                                     nav.ValueRO.Destination, ecb);
+                    nav.ValueRW.RepathCooldown = time + 0.5f;
+                    continue;
+                }
+
+                // ── Skip agents already moving on a valid path ─────────────
+                // Re-evaluating mode every frame would interrupt valid paths.
+                if (movement.ValueRO.IsFollowingPath == 1 &&
+                    nav.ValueRO.Mode != NavMode.Idle)
+                    continue;
+
+                // ── Determine mode ─────────────────────────────────────────
+                int2 destChunk = ChunkManagerSystem.WorldToChunkCoord(
+                    nav.ValueRO.Destination, config);
 
                 NavMode desiredMode;
-                if (crossChunk && nav.ValueRO.Mode != NavMode.MacroOnly)
+                if (!readyChunks.Contains(destChunk))
+                {
+                    // Destination chunk not baked yet — need macro nav to approach
                     desiredMode = NavMode.MacroOnly;
+                }
                 else
                 {
+                    // Destination chunk has static data — use A* directly.
+                    // A* handles cross-chunk moves fine when both chunks are loaded.
                     ulong key = QuantizeDestination(nav.ValueRO.Destination, config);
                     int cnt = destCounts.TryGetValue(key, out int c) ? c : 1;
                     desiredMode = cnt >= CrowdThreshold ? NavMode.FlowField : NavMode.AStar;
                 }
 
-                // Handle mode transition
-                if (desiredMode != nav.ValueRO.Mode)
+                // ── Apply mode ─────────────────────────────────────────────
+                if (desiredMode != nav.ValueRO.Mode ||
+                    (movement.ValueRO.IsFollowingPath == 0 && time >= nav.ValueRO.RepathCooldown))
                 {
                     nav.ValueRW.Mode = desiredMode;
+
                     if (desiredMode == NavMode.AStar || desiredMode == NavMode.MacroOnly)
                     {
                         ecb.SetComponentEnabled<FlowFieldFollower>(entity, false);
-                        IssuePathRequest(entity, transform.ValueRO.Position, nav.ValueRO.Destination, ecb);
+                        IssuePathRequest(entity, transform.ValueRO.Position,
+                                         nav.ValueRO.Destination, ecb);
+                        nav.ValueRW.RepathCooldown = time + 0.5f;
                     }
                     else if (desiredMode == NavMode.FlowField)
                     {
@@ -87,18 +128,9 @@ namespace Navigation.ECS
                         ecb.SetComponentEnabled<FlowFieldFollower>(entity, true);
                     }
                 }
-
-                // Repath if A* agent has no path and cooldown elapsed
-                if (nav.ValueRO.Mode == NavMode.AStar &&
-                    movement.ValueRO.IsFollowingPath == 0 &&
-                    time >= nav.ValueRO.RepathCooldown)
-                {
-                    IssuePathRequest(entity, transform.ValueRO.Position, nav.ValueRO.Destination, ecb);
-                    nav.ValueRW.RepathCooldown = time + 0.5f;
-                }
             }
 
-            // 3. Stuck detection � Burst parallel job
+            // Stuck detection
             var stuckJob = new StuckDetectionJob
             {
                 CurrentTime = time,
@@ -110,6 +142,7 @@ namespace Navigation.ECS
             ecb.Playback(EntityManager);
             ecb.Dispose();
             destCounts.Dispose();
+            readyChunks.Dispose();
         }
 
         private static void IssuePathRequest(Entity entity, float3 start, float3 end,
@@ -117,7 +150,12 @@ namespace Navigation.ECS
         {
             ecb.SetComponentEnabled<PathRequest>(entity, true);
             ecb.SetComponent(entity, new PathRequest
-            { Start = start, End = end, Priority = 1, RequestTime = 0f });
+            {
+                Start = start,
+                End = end,
+                Priority = 1,
+                RequestTime = 0f
+            });
         }
 
         private static ulong QuantizeDestination(float3 pos, NavigationConfig config)
@@ -177,7 +215,8 @@ namespace Navigation.ECS
         {
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
             foreach (var (nav, transform, repathEnabled, entity) in
-                SystemAPI.Query<RefRO<AgentNavigation>, RefRO<LocalTransform>, EnabledRefRO<NeedsRepath>>()
+                SystemAPI.Query<RefRO<AgentNavigation>, RefRO<LocalTransform>,
+                                EnabledRefRO<NeedsRepath>>()
                     .WithEntityAccess())
             {
                 if (nav.ValueRO.HasDestination == 0) continue;

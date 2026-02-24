@@ -91,65 +91,95 @@ namespace Navigation.ECS
             int2 startChunk = ChunkManagerSystem.WorldToChunkCoord(entry.Request.Start, config);
             int2 endChunk = ChunkManagerSystem.WorldToChunkCoord(entry.Request.End, config);
 
-            // ── Single-chunk path (most common case) ──
+            bool startLoaded = _chunkBlobMap.TryGetValue(startChunk, out var startBlob);
+            bool endLoaded = _chunkBlobMap.TryGetValue(endChunk, out var endBlob);
+
+            // ── Both endpoints in the same loaded chunk ────────────────────
             if (math.all(startChunk == endChunk))
             {
-                if (!_chunkBlobMap.TryGetValue(startChunk, out var blob))
-                {
-                    // Chunk not loaded yet — skip, will retry next frame
-                    return;
-                }
-
-                var pathOut = new NativeList<float3>(128, Allocator.TempJob);
-
-                var job = new AStarSingleChunkJob
-                {
-                    Config = config,
-                    ChunkCoord = startChunk,
-                    StartWorld = entry.Request.Start,
-                    EndWorld = entry.Request.End,
-                    Permissions = entry.Permissions,
-                    Blob = blob,
-                    PathOut = pathOut
-                };
-
-                // Run inline (we're already on main thread, budget controlled by MaxRequestsPerFrame)
-                // To push to worker threads: schedule and complete before ecb.Playback
-                job.Execute();
-
-                if (pathOut.Length > 0)
-                {
-                    // Write waypoints to buffer
-                    var buffer = EntityManager.GetBuffer<PathWaypoint>(entry.Entity);
-                    buffer.Clear();
-                    for (int i = 0; i < pathOut.Length; i++)
-                        buffer.Add(new PathWaypoint { Position = pathOut[i] });
-
-                    ecb.SetComponentEnabled<PathfindingSuccess>(entry.Entity, true);
-                }
-                else
-                {
-                    ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
-                }
-
-                pathOut.Dispose();
+                if (!startLoaded) return; // Retry next frame
+                RunAStarInChunk(entry, config, startChunk, startBlob,
+                                entry.Request.Start, entry.Request.End, ecb);
             }
+            // ── Cross-chunk but destination chunk is loaded ────────────────
+            // Run A* entirely within the destination chunk, clamping the
+            // start to the nearest edge cell of that chunk when needed.
+            // Fixes the bug where (0,0,0) -> (-5,0,0) sent the agent to
+            // chunk-centre (32,0,32) before heading to the destination.
+            else if (endLoaded)
+            {
+                float3 effectiveStart = startLoaded
+                    ? entry.Request.Start
+                    : ClampWorldPosToChunk(entry.Request.Start, endChunk, config);
+
+                RunAStarInChunk(entry, config, endChunk, endBlob,
+                                effectiveStart, entry.Request.End, ecb);
+            }
+            // ── Destination chunk not loaded — macro nav ───────────────────
             else
             {
-                // Multi-chunk: use macro path + per-chunk micro stitching (Phase 2)
-                // For now, fall back to macro waypoints only
                 BuildMacroCrossChunkPath(entry, config, startChunk, endChunk, ecb);
             }
 
-            // Remove the request regardless of result
             ecb.SetComponentEnabled<PathRequest>(entry.Entity, false);
+        }
+
+        /// <summary>
+        /// Clamps a world position so it falls inside the given chunk's cell grid.
+        /// Used when the agent is in an unloaded chunk but the destination chunk is ready.
+        /// </summary>
+        private static float3 ClampWorldPosToChunk(float3 worldPos, int2 chunkCoord,
+                                                    NavigationConfig config)
+        {
+            float3 origin = ChunkManagerSystem.ChunkCoordToWorld(chunkCoord, config);
+            float size = config.ChunkCellCount * config.CellSize;
+            float half = config.CellSize * 0.5f;
+            return new float3(
+                math.clamp(worldPos.x, origin.x + half, origin.x + size - half),
+                worldPos.y,
+                math.clamp(worldPos.z, origin.z + half, origin.z + size - half));
+        }
+
+        /// <summary>
+        /// Runs AStarSingleChunkJob and writes results to the agent's PathWaypoint buffer.
+        /// </summary>
+        private void RunAStarInChunk(PathRequestEntry entry, NavigationConfig config,
+                                      int2 chunkCoord, BlobAssetReference<ChunkStaticBlob> blob,
+                                      float3 startWorld, float3 endWorld,
+                                      EntityCommandBuffer ecb)
+        {
+            var pathOut = new NativeList<float3>(128, Allocator.TempJob);
+            var job = new AStarSingleChunkJob
+            {
+                Config = config,
+                ChunkCoord = chunkCoord,
+                StartWorld = startWorld,
+                EndWorld = endWorld,
+                Permissions = entry.Permissions,
+                Blob = blob,
+                PathOut = pathOut
+            };
+            job.Execute();
+
+            if (pathOut.Length > 0)
+            {
+                var buffer = EntityManager.GetBuffer<PathWaypoint>(entry.Entity);
+                buffer.Clear();
+                for (int i = 0; i < pathOut.Length; i++)
+                    buffer.Add(new PathWaypoint { Position = pathOut[i] });
+                ecb.SetComponentEnabled<PathfindingSuccess>(entry.Entity, true);
+            }
+            else
+            {
+                ecb.SetComponentEnabled<PathfindingFailed>(entry.Entity, true);
+            }
+            pathOut.Dispose();
         }
 
         private void BuildMacroCrossChunkPath(PathRequestEntry entry, NavigationConfig config,
                                                int2 startChunk, int2 endChunk,
                                                EntityCommandBuffer ecb)
         {
-            // Chunk-level A* to find corridor of chunks to traverse
             var macroPath = new NativeList<int2>(32, Allocator.Temp);
             bool macroFound = RunMacroAStar(startChunk, endChunk, config, ref macroPath);
 
@@ -160,14 +190,20 @@ namespace Navigation.ECS
                 return;
             }
 
-            // Write macro waypoints to buffer
             var macroBuffer = EntityManager.GetBuffer<MacroWaypoint>(entry.Entity);
             macroBuffer.Clear();
 
+            float chunkWorldSize = config.ChunkCellCount * config.CellSize;
+
             for (int i = 0; i < macroPath.Length; i++)
             {
-                float chunkWorldSize = config.ChunkCellCount * config.CellSize;
                 int2 coord = macroPath[i];
+
+                // Skip the start chunk — the agent is already inside it.
+                // Including it sends the agent to the chunk centre (32,32) before
+                // heading toward the destination, causing large wrong-direction detours.
+                if (math.all(coord == startChunk)) continue;
+
                 float3 entryPoint = new float3(
                     coord.x * chunkWorldSize + chunkWorldSize * 0.5f,
                     0f,
@@ -180,7 +216,6 @@ namespace Navigation.ECS
                 });
             }
 
-            // Switch agent to macro nav mode
             var nav = EntityManager.GetComponentData<AgentNavigation>(entry.Entity);
             nav.Mode = NavMode.MacroOnly;
             ecb.SetComponent(entry.Entity, nav);

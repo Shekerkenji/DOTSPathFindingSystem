@@ -4,7 +4,7 @@
 PlayerSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 28
-  productGUID: f219c75710c0a0d42a63a12fe2915633
+  productGUID: c30b15db520b2a14bb9497970e88ba85
   AndroidProfiler: 0
   AndroidFilterTouchesWhenObscured: 0
   AndroidEnableSustainedPerformanceMode: 0
@@ -13,7 +13,7 @@ PlayerSettings:
   useOnDemandResources: 0
   accelerometerFrequency: 60
   companyName: DefaultCompany
-  productName: DOTSPathFinding
+  productName: DOTSPathfinding
   defaultCursor: {fileID: 0}
   cursorHotspot: {x: 0, y: 0}
   m_SplashScreenBackgroundColor: {r: 0.13725491, g: 0.12156863, b: 0.1254902, a: 1}
@@ -846,14 +846,14 @@ PlayerSettings:
   editorAssembliesCompatibilityLevel: 1
   m_RenderingPath: 1
   m_MobileRenderingPath: 1
-  metroPackageName: DOTSPathFinding
+  metroPackageName: DOTSPathfinding
   metroPackageVersion: 
   metroCertificatePath: 
   metroCertificatePassword: 
   metroCertificateSubject: 
   metroCertificateIssuer: 
   metroCertificateNotAfter: 0000000000000000
-  metroApplicationDescription: DOTSPathFinding
+  metroApplicationDescription: DOTSPathfinding
   wsaImages: {}
   metroTileShortName: 
   metroTileShowName: 0
@@ -924,10 +924,10 @@ PlayerSettings:
   captureStartupLogs: {}
   activeInputHandler: 1
   windowsGamepadBackendHint: 0
-  cloudProjectId: 8d3d385a-154b-482f-8df6-8e002178bfa1
+  cloudProjectId: 92481284-55bb-4696-b1e1-5bc5220825c2
   framebufferDepthMemorylessMode: 0
   qualitySettingsNames: []
-  projectName: DOTSPathFinding
+  projectName: DOTSPathfinding
   organizationId: veevis
   cloudEnabled: 0
   legacyClampBlendShapeWeights: 0

@@ -6,14 +6,6 @@ using Unity.Transforms;
 
 namespace Navigation.ECS
 {
-    /// <summary>
-    /// Moves agents along their paths.
-    /// - A* agents: follow PathWaypoint buffer
-    /// - FlowField agents: sample vector field each frame (O(1) lookup)
-    /// - MacroOnly agents: follow MacroWaypoint chunk entry points
-    ///
-    /// Fully Burst compiled. No managed calls.
-    /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [BurstCompile]
     public partial struct UnitMovementSystem : ISystem
@@ -30,25 +22,20 @@ namespace Navigation.ECS
             float dt = SystemAPI.Time.DeltaTime;
             var config = SystemAPI.GetSingleton<NavigationConfig>();
 
-            // ── A* path followers ──
+            // A* followers
             var astarJob = new FollowAStarPathJob { DeltaTime = dt };
             state.Dependency = astarJob.ScheduleParallel(state.Dependency);
 
-            // ── Macro path followers (cross-chunk) ──
+            // Macro followers — NO ECB needed.
+            // When the macro path finishes, the job sets nav.MacroPathDone = 1.
+            // NavigationDispatchSystem reads this flag on the main thread next frame
+            // and issues the final PathRequest. This avoids the
+            // BeginSimulationEntityCommandBufferSystem.Singleton not-found crash.
             var macroJob = new FollowMacroPathJob { DeltaTime = dt };
             state.Dependency = macroJob.ScheduleParallel(state.Dependency);
 
-            // ── Flow field followers ──
-            // Note: flow field sampling needs read access to FlowFieldData.
-            // We pass the field data via a lookup (component lookup is safe read-only in parallel)
-            var flowJob = new FollowFlowFieldJob
-            {
-                DeltaTime = dt,
-                Config = config
-                // FlowField sampling is done via chunk coord + cell lookup in the job
-                // Full field lookup requires a NativeHashMap passed from FlowFieldSystem
-                // (wired up in OnUpdate below via a shared static or singleton entity)
-            };
+            // Flow field followers
+            var flowJob = new FollowFlowFieldJob { DeltaTime = dt, Config = config };
             state.Dependency = flowJob.ScheduleParallel(state.Dependency);
         }
 
@@ -75,16 +62,10 @@ namespace Navigation.ECS
 
                 float3 currentPos = transform.Position;
                 float3 target = path[movement.CurrentWaypointIndex].Position;
-
-                // Flatten Y for ground units
-                if (perms.IsFlying == 0)
-                {
-                    target.y = currentPos.y; // Ignore vertical in movement calc
-                }
+                if (perms.IsFlying == 0) target.y = currentPos.y;
 
                 float dist = math.distance(currentPos, target);
 
-                // Advance waypoint
                 if (dist <= movement.TurnDistance)
                 {
                     movement.CurrentWaypointIndex++;
@@ -101,19 +82,14 @@ namespace Navigation.ECS
                 if (dist < 0.001f) return;
 
                 float3 direction = (target - currentPos) / dist;
-
-                // Rotation
                 quaternion targetRot = quaternion.LookRotationSafe(direction, math.up());
-                transform.Rotation = math.slerp(
-                    transform.Rotation, targetRot,
+                transform.Rotation = math.slerp(transform.Rotation, targetRot,
                     DeltaTime * movement.TurnSpeed);
 
-                // Only move when reasonably aligned (prevents moonwalking)
                 float3 forward = math.mul(transform.Rotation, new float3(0, 0, 1));
                 float alignment = math.dot(forward, direction);
                 float speedScale = math.max(0.25f, alignment);
 
-                // Slow down near final waypoint
                 if (movement.CurrentWaypointIndex == path.Length - 1)
                     speedScale *= math.saturate(dist / (movement.TurnDistance * 3f));
 
@@ -139,21 +115,22 @@ namespace Navigation.ECS
 
                 if (movement.CurrentWaypointIndex >= macroPath.Length)
                 {
-                    // Finished macro path — switch to A* for final micro approach
+                    // Signal main thread to issue the final A* path request.
+                    // Writing nav fields directly is safe here (no ECB race).
+                    nav.MacroPathDone = 1;
                     nav.Mode = NavMode.AStar;
+                    movement.IsFollowingPath = 0;
                     movement.CurrentWaypointIndex = 0;
                     return;
                 }
 
                 float3 currentPos = transform.Position;
                 float3 target = macroPath[movement.CurrentWaypointIndex].WorldEntryPoint;
-
                 if (perms.IsFlying == 0) target.y = currentPos.y;
 
                 float dist = math.distance(currentPos, target);
 
-                // Chunk centre reach threshold is larger (coarse navigation)
-                float chunkReachDist = 10f;
+                const float chunkReachDist = 10f;
                 if (dist <= chunkReachDist)
                 {
                     movement.CurrentWaypointIndex++;
@@ -162,31 +139,22 @@ namespace Navigation.ECS
 
                 float3 direction = (target - currentPos) / dist;
                 quaternion targetRot = quaternion.LookRotationSafe(direction, math.up());
-                transform.Rotation = math.slerp(transform.Rotation, targetRot, DeltaTime * movement.TurnSpeed);
+                transform.Rotation = math.slerp(transform.Rotation, targetRot,
+                    DeltaTime * movement.TurnSpeed);
 
                 float3 forward = math.mul(transform.Rotation, new float3(0, 0, 1));
                 float alignment = math.dot(forward, direction);
-                float speedScale = math.max(0.25f, alignment);
-
-                transform.Position += forward * movement.Speed * speedScale * DeltaTime;
+                transform.Position += forward * movement.Speed * math.max(0.25f, alignment) * DeltaTime;
             }
         }
 
         // ── Flow Field Follower ──────────────────────────────────────────
 
         [BurstCompile]
-        // FlowFieldFollower is enableable — use EnabledRefRO in Execute
         partial struct FollowFlowFieldJob : IJobEntity
         {
             public float DeltaTime;
             public NavigationConfig Config;
-
-            // Note: Direct NativeArray field sampling is done here.
-            // To pass the field vectors, use a ComponentLookup<FlowFieldData>
-            // or a shared NativeHashMap<int2, NativeArray<float2>>.
-            // For now, movement uses last-known direction stored on agent.
-            // Full field lookup wiring is completed when FlowFieldSystem
-            // exposes a shared NativeHashMap via a singleton component.
 
             void Execute(ref LocalTransform transform, ref UnitMovement movement,
                          ref AgentNavigation nav, in FlowFieldFollower follower,
@@ -197,14 +165,8 @@ namespace Navigation.ECS
                 if (nav.Mode != NavMode.FlowField) return;
                 if (nav.HasDestination == 0) return;
 
-                // Direction from last cached sample (updated by FlowFieldSamplerSystem)
-                // This job moves the agent using the cached direction
                 float3 currentPos = transform.Position;
-
-                // Simple fallback: move toward destination directly
-                // Replace nav.LastKnownPosition with sampled flow vector
-                float3 target = nav.Destination;
-                float3 toTarget = target - currentPos;
+                float3 toTarget = nav.Destination - currentPos;
                 float dist = math.length(toTarget);
 
                 if (dist < nav.ArrivalThreshold) return;
@@ -215,22 +177,18 @@ namespace Navigation.ECS
                 direction = math.normalize(direction);
 
                 quaternion targetRot = quaternion.LookRotationSafe(direction, math.up());
-                transform.Rotation = math.slerp(transform.Rotation, targetRot, DeltaTime * movement.TurnSpeed);
+                transform.Rotation = math.slerp(transform.Rotation, targetRot,
+                    DeltaTime * movement.TurnSpeed);
 
                 float3 forward = math.mul(transform.Rotation, new float3(0, 0, 1));
-                float alignment = math.dot(forward, direction);
-
-                // Flow field agents move more smoothly — less alignment penalty
-                float speedScale = math.max(0.5f, alignment);
+                float speedScale = math.max(0.5f, math.dot(forward, direction));
                 transform.Position += forward * movement.Speed * speedScale * DeltaTime;
             }
         }
     }
 
-    /// <summary>
-    /// Fires path success signal — starts A* agents moving.
-    /// Runs immediately after AStarSystem.
-    /// </summary>
+    // ── Path Success Handler ─────────────────────────────────────────────────
+
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateAfter(typeof(AStarSystem))]
     [UpdateBefore(typeof(UnitMovementSystem))]
@@ -243,7 +201,8 @@ namespace Navigation.ECS
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
             foreach (var (movement, nav, successEnabled, entity) in
-                SystemAPI.Query<RefRW<UnitMovement>, RefRO<AgentNavigation>, EnabledRefRO<PathfindingSuccess>>()
+                SystemAPI.Query<RefRW<UnitMovement>, RefRO<AgentNavigation>,
+                                EnabledRefRO<PathfindingSuccess>>()
                     .WithEntityAccess())
             {
                 if (!successEnabled.ValueRO) continue;
