@@ -2,7 +2,7 @@
 using Unity.Mathematics;
 using Unity.Collections;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     // ─────────────────────────────────────────────
     // GRID & CHUNK COMPONENTS

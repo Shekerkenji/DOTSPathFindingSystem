@@ -2,7 +2,7 @@
 using Unity.Entities;
 using UnityEngine;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Authoring component for a character that uses a multi-clip animation library.

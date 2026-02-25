@@ -6,7 +6,7 @@ using Unity.Transforms;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// GPU Skinning Render System — Compute Shader Architecture.

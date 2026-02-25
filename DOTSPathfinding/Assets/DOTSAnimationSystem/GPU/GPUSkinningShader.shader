@@ -1,4 +1,4 @@
-Shader "DOTSAnimation/GPUSkinning"
+Shader "Shek.ECSAnimation/GPUSkinning"
 {
     Properties
     {

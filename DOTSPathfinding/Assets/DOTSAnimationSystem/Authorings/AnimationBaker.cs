@@ -3,7 +3,7 @@ using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     public static class AnimationBaker
     {

@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Burst;
 using UnityEngine;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     [UpdateInGroup(typeof(InitializationSystemGroup))]
     [UpdateAfter(typeof(StreamingAnchorSystem))]

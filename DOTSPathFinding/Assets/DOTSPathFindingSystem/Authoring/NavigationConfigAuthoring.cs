@@ -2,13 +2,12 @@
 using Unity.Collections;
 using UnityEngine;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Place on an empty GameObject — one per scene.
     /// Configures the entire navigation system.
     /// </summary>
-    [AddComponentMenu("Navigation/Navigation Config")]
     public class NavigationConfigAuthoring : MonoBehaviour
     {
         [Header("Grid")]

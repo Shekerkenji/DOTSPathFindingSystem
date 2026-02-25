@@ -3,7 +3,7 @@ using Unity.Mathematics;
 using Unity.Collections;
 using Unity.Burst;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Manages flow fields: one field per destination cluster.

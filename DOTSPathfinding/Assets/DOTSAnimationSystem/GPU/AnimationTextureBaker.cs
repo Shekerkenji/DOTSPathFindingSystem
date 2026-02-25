@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Bakes animation clips into a GPU skinning texture.

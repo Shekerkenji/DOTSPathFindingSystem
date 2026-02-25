@@ -1,7 +1,7 @@
 ﻿using Unity.Entities;
 using UnityEngine;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// MonoBehaviour authoring component for a skinned mesh entity.

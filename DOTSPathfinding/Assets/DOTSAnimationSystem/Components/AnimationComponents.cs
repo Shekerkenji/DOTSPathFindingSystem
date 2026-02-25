@@ -2,7 +2,7 @@
 using Unity.Mathematics;
 using Unity.Collections;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     // ─────────────────────────────────────────────────────────────────────────
     // Core bone / transform types

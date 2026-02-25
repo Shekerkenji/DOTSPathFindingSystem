@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Samples animation poses each frame and writes float4x4 matrices into BoneTransformBuffer.

@@ -2,14 +2,13 @@ using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Add to ANY entity that should anchor chunk streaming around it.
     /// Multiple anchors are supported — squads, cameras, cinematic targets, AI directors.
     /// ChunkManagerSystem unions all anchor positions and loads chunks around all of them.
     /// </summary>
-    [AddComponentMenu("Navigation/Streaming Anchor")]
     public class StreamingAnchorAuthoring : MonoBehaviour
     {
         [Tooltip("Priority weight — higher priority anchors load a larger active ring. " +

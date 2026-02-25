@@ -3,7 +3,7 @@ using Unity.Entities;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Attach to your character prefab root alongside AnimationLibraryAuthoring.
@@ -24,7 +24,7 @@ namespace DOTSAnimation
         public GPUSkinningLibraryAsset libraryAsset;
 
         [Header("Material")]
-        [Tooltip("Must use the DOTSAnimation/GPUSkinning shader.")]
+        [Tooltip("Must use the Shek.ECSAnimation/GPUSkinning shader.")]
         public Material material;
 
         [Header("Rendering")]

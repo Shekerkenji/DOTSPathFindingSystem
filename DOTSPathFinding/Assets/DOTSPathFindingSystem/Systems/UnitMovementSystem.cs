@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Burst;
 using Unity.Transforms;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     public partial struct UnitMovementSystem : ISystem
@@ -303,7 +303,7 @@ namespace Navigation.ECS
         }
     }
 }
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     // ── Movement Event System ────────────────────────────────────────────────
     // Runs after UnitMovementSystem. Compares IsFollowingPath against

@@ -1,9 +1,9 @@
 using Unity.Burst;
 using Unity.Entities;
-using Navigation.ECS;
-using DOTSAnimation;
+using Shek.ECSNavigation;
+using Shek.ECSAnimation;
 
-namespace DOTSEventSystem
+namespace Shek.ECSEventSystem
 {
     [BurstCompile]
     [UpdateInGroup(typeof(SimulationSystemGroup))]

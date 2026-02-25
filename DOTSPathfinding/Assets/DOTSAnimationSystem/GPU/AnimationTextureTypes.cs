@@ -2,7 +2,7 @@ using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     // =========================================================================
     // GPU Skinning Components

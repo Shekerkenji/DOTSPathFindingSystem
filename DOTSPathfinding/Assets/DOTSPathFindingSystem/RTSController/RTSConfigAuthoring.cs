@@ -1,9 +1,8 @@
 using Unity.Entities;
 using Unity.Mathematics;
-using Unity.VisualScripting.FullSerializer;
 using UnityEngine;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Place on ONE empty GameObject in your test scene to configure and enable the RTS system.

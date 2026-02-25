@@ -4,7 +4,7 @@ using Unity.Mathematics;
 using UnityEngine;
 using System.Collections.Generic;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Bakes a list of AnimationClips into a single <see cref="AnimationLibraryBlob"/>.

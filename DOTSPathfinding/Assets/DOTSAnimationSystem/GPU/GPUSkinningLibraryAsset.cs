@@ -1,7 +1,7 @@
 using UnityEngine;
 
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     /// <summary>
     /// Saved alongside the animation texture. Assigned to GPUSkinningAuthoring

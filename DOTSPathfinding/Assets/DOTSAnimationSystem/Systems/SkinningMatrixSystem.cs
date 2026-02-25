@@ -7,7 +7,7 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Rendering;
 
-namespace DOTSAnimation
+namespace Shek.ECSAnimation
 {
     // =========================================================================
     // BoneIndexCachingSystem

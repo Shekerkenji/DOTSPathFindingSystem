@@ -2,7 +2,7 @@
 using Unity.Mathematics;
 using UnityEngine;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Add to any GameObject that should be a navigation agent.
@@ -11,8 +11,7 @@ namespace Navigation.ECS
     /// To issue move orders at runtime, use:
     ///   NavigationAPI.SetDestination(EntityManager, entity, targetPosition);
     /// </summary>
-    [AddComponentMenu("Navigation/Unit")]
-    public class UnitAuthoring : MonoBehaviour
+    public class DotsNavAgentAuthoring : MonoBehaviour
     {
         [Header("Movement")]
         [Tooltip("World units per second.")]
@@ -55,9 +54,9 @@ namespace Navigation.ECS
         public int maxStuckCount = 3;
     }
 
-    public class UnitBaker : Baker<UnitAuthoring>
+    public class UnitBaker : Baker<DotsNavAgentAuthoring>
     {
-        public override void Bake(UnitAuthoring authoring)
+        public override void Bake(DotsNavAgentAuthoring authoring)
         {
             var entity = GetEntity(TransformUsageFlags.Dynamic);
 
