@@ -303,3 +303,78 @@ namespace Navigation.ECS
         }
     }
 }
+namespace Navigation.ECS
+{
+    // ── Movement Event System ────────────────────────────────────────────────
+    // Runs after UnitMovementSystem. Compares IsFollowingPath against
+    // PreviousIsFollowingPath to detect 0->1 and 1->0 transitions and fire
+    // the one-shot StartedMoving / StoppedMoving events.
+
+    [UpdateInGroup(typeof(SimulationSystemGroup))]
+    [UpdateAfter(typeof(UnitMovementSystem))]
+    [BurstCompile]
+    public partial struct MovementEventSystem : ISystem
+    {
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var ecb = new EntityCommandBuffer(Allocator.TempJob);
+            var job = new FireMovementEventsJob { ECBWriter = ecb.AsParallelWriter() };
+            state.Dependency = job.ScheduleParallel(state.Dependency);
+            state.Dependency.Complete();
+            ecb.Playback(state.EntityManager);
+            ecb.Dispose();
+        }
+
+        [BurstCompile]
+        partial struct FireMovementEventsJob : IJobEntity
+        {
+            public EntityCommandBuffer.ParallelWriter ECBWriter;
+
+            void Execute([ChunkIndexInQuery] int sortKey, Entity entity,
+                         ref UnitMovement movement)
+            {
+                byte prev = movement.PreviousIsFollowingPath;
+                byte curr = movement.IsFollowingPath;
+
+                if (prev == 0 && curr == 1)
+                    ECBWriter.SetComponentEnabled<StartedMoving>(sortKey, entity, true);
+                else if (prev == 1 && curr == 0)
+                    ECBWriter.SetComponentEnabled<StoppedMoving>(sortKey, entity, true);
+
+                movement.PreviousIsFollowingPath = curr;
+            }
+        }
+    }
+
+    // ── Movement Event Cleanup System ────────────────────────────────────────
+    // Runs at the end of the frame and disables StartedMoving / StoppedMoving
+    // so they are active for exactly one frame.
+    // [WithAll] on an IEnableableComponent filters to entities where it is ENABLED —
+    // this is the correct pattern; [WithAny] does NOT filter by enabled state.
+
+    // Cleanup runs on the main thread with direct SetComponentEnabled calls -
+    // no ECB, no playback timing ambiguity.
+    [UpdateInGroup(typeof(LateSimulationSystemGroup))]
+    public partial class MovementEventCleanupSystem : SystemBase
+    {
+        protected override void OnUpdate()
+        {
+            foreach (var (_, entity) in
+                SystemAPI.Query<EnabledRefRO<StartedMoving>>()
+                    .WithAll<StartedMoving>()
+                    .WithEntityAccess())
+            {
+                SystemAPI.SetComponentEnabled<StartedMoving>(entity, false);
+            }
+
+            foreach (var (_, entity) in
+                SystemAPI.Query<EnabledRefRO<StoppedMoving>>()
+                    .WithAll<StoppedMoving>()
+                    .WithEntityAccess())
+            {
+                SystemAPI.SetComponentEnabled<StoppedMoving>(entity, false);
+            }
+        }
+    }
+}

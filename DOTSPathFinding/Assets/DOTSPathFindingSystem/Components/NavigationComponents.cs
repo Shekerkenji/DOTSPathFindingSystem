@@ -118,6 +118,13 @@ namespace Navigation.ECS
         public float TurnDistance;
         public int CurrentWaypointIndex;
         public byte IsFollowingPath;
+        /// <summary>
+        /// Written by MovementEventSystem each frame after firing events.
+        /// Stores the value of IsFollowingPath from the previous frame so the
+        /// event system can detect 0→1 and 1→0 transitions without polling.
+        /// Do not write this from anywhere else.
+        /// </summary>
+        public byte PreviousIsFollowingPath;
     }
 
     public struct PathWaypoint : IBufferElementData
@@ -254,4 +261,9 @@ namespace Navigation.ECS
     }
 
     public struct NavigationStopCommand : IComponentData, IEnableableComponent { }
+
+    public struct StartedMoving : IComponentData, IEnableableComponent { }
+    public struct StoppedMoving : IComponentData, IEnableableComponent { }
+
+
 }

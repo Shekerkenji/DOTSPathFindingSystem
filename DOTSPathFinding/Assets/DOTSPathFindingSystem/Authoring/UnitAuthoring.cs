@@ -1,4 +1,4 @@
-using Unity.Entities;
+ï»¿using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -33,7 +33,7 @@ namespace Navigation.ECS
 
         [Header("Layer Permissions")]
         [Tooltip(
-            "Bitmask — which terrain layers this unit can enter.\n" +
+            "Bitmask ï¿½ which terrain layers this unit can enter.\n" +
             "Bit 0 (0x01) = Ground/Infantry\n" +
             "Bit 1 (0x02) = Flying\n" +
             "Bit 2 (0x04) = Vehicle\n" +
@@ -103,7 +103,7 @@ namespace Navigation.ECS
             AddBuffer<PathWaypoint>(entity);
             AddBuffer<MacroWaypoint>(entity);
 
-            // Enableable tag components — all disabled at spawn
+            // Enableable tag components ï¿½ all disabled at spawn
             AddComponent(entity, new PathRequest());
             SetComponentEnabled<PathRequest>(entity, false);
 
@@ -119,12 +119,19 @@ namespace Navigation.ECS
             AddComponent(entity, new FlowFieldFollower());
             SetComponentEnabled<FlowFieldFollower>(entity, false);
 
-            // Navigation command receivers — disabled until a command is issued
+            // Navigation command receivers ï¿½ disabled until a command is issued
             AddComponent(entity, new NavigationMoveCommand());
             SetComponentEnabled<NavigationMoveCommand>(entity, false);
 
             AddComponent(entity, new NavigationStopCommand());
             SetComponentEnabled<NavigationStopCommand>(entity, false);
+
+            // Movement event signals â€” disabled at spawn, enabled for one frame by the system
+            AddComponent(entity, new StartedMoving());
+            SetComponentEnabled<StartedMoving>(entity, false);
+
+            AddComponent(entity, new StoppedMoving());
+            SetComponentEnabled<StoppedMoving>(entity, false);
         }
     }
 }
