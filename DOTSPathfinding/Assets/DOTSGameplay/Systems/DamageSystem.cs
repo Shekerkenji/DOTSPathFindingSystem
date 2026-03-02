@@ -51,8 +51,9 @@ namespace Shek.ECSGameplay
                 // Signal hit animation (non-dead)
                 if (health.ValueRO.Current > 0 && aiState.ValueRO.State != UnitState.Dead)
                 {
-                    aiState.ValueRW.State = UnitState.Hit;
-                    aiState.ValueRW.StateTimer = 0f;
+                    aiState.ValueRW.PreHitState = aiState.ValueRO.State; // remember what we were doing
+                    //aiState.ValueRW.State = UnitState.Hit;
+                    //aiState.ValueRW.StateTimer = 0f;
                 }
 
                 // Death
@@ -130,11 +131,12 @@ namespace Shek.ECSGameplay
                 aiState.ValueRW.StateTimer += dt;
                 if (aiState.ValueRO.StateTimer < HitAnimDuration) continue;
 
-                // Recover
+                // Recover — restore to what we were doing before the hit,
+                // not blindly to Attacking, so we don't re-trigger looped clips.
                 aiState.ValueRW.StateTimer = 0f;
-                aiState.ValueRW.State = currentTarget.ValueRO.HasTarget == 1
-                    ? UnitState.Attacking
-                    : UnitState.Idle;
+                aiState.ValueRW.State = aiState.ValueRO.PreHitState != UnitState.Hit
+                    ? aiState.ValueRO.PreHitState
+                    : (currentTarget.ValueRO.HasTarget == 1 ? UnitState.Attacking : UnitState.Idle);
             }
         }
     }

@@ -49,6 +49,8 @@ namespace Shek.ECSGameplay
 
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
+            var meleeSlotAssignmentLookup = SystemAPI.GetComponentLookup<MeleeSlotAssignment>(true);
+
             var job = new AIDecisionJob
             {
                 Time = time,
@@ -58,6 +60,7 @@ namespace Shek.ECSGameplay
                 MeleeSlotLookup = meleeSlotLookup,
                 HealthLookup = healthLookup,
                 DeadLookup = deadLookup,
+                MeleeSlotAssignmentLookup = meleeSlotAssignmentLookup,
                 ECBWriter = ecb.AsParallelWriter()
             };
 
@@ -80,6 +83,14 @@ namespace Shek.ECSGameplay
             [ReadOnly] public ComponentLookup<MeleeSlotComponent> MeleeSlotLookup;
             [ReadOnly] public ComponentLookup<HealthComponent> HealthLookup;
             [ReadOnly] public ComponentLookup<DeadTag> DeadLookup;
+            // BUG FIX: MeleeSlotAssignment is IEnableableComponent. Including it as
+            // "in MeleeSlotAssignment" in Execute adds an implicit [WithAll] that
+            // EXCLUDES entities where the component is disabled — i.e. every unit
+            // that hasn't been assigned a slot yet. Units with no current target
+            // (and thus no slot) were silently skipped by the query every frame,
+            // so AIDecisionSystem never issued a NavigationMoveCommand.
+            // Fix: read it through ComponentLookup so we control the lookup ourselves.
+            [ReadOnly] public ComponentLookup<MeleeSlotAssignment> MeleeSlotAssignmentLookup;
 
             public EntityCommandBuffer.ParallelWriter ECBWriter;
 
@@ -92,10 +103,16 @@ namespace Shek.ECSGameplay
                 in LocalTransform transform,
                 in UnitData unitData,
                 in Weapon weapon,
-                in MeleeSlotAssignment slotAssignment,
-                EnabledRefRO<MeleeSlotAssignment> slotEnabled,
                 in DetectionComponent detection)
             {
+                // Read MeleeSlotAssignment through lookup so disabled components
+                // don't exclude units from the query (see field comment above).
+                bool hasSlot = MeleeSlotAssignmentLookup.HasComponent(entity) &&
+                               MeleeSlotAssignmentLookup.IsComponentEnabled(entity);
+                MeleeSlotAssignment slotAssignment = hasSlot
+                    ? MeleeSlotAssignmentLookup[entity]
+                    : default;
+                bool slotEnabledValue = hasSlot;
                 aiState.StateTimer += DeltaTime;
 
                 // ── Dead guard ─────────────────────────────────────────────
@@ -168,7 +185,7 @@ namespace Shek.ECSGameplay
                 {
                     // Melee: orbit to assigned slot position
                     float orbitRadius = unitData.Radius + targetRadius + weapon.Range * 0.5f;
-                    float angle = slotEnabled.ValueRO
+                    float angle = slotEnabledValue
                         ? (float)slotAssignment.SlotIndex / math.max(1, slotAssignment.TotalSlots) * math.PI * 2f
                         : 0f;
 

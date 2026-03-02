@@ -15,7 +15,20 @@ namespace Shek.ECSNavigation
             state.RequireForUpdate<NavigationConfig>();
         }
 
-        [BurstCompile]
+        // FIX: [BurstCompile] removed from OnUpdate.
+        //
+        // Burst error BC1040: "Loading from a non-readonly static field
+        // FlowFieldSamplerSystem.SampledDirections is not supported."
+        //
+        // OnUpdate reads the static NativeHashMap written by FlowFieldSamplerSystem
+        // so it can pass sampled directions to FollowFlowFieldJob. Burst prohibits
+        // reading non-readonly statics from within a Burst-compiled method.
+        //
+        // The fix is to remove [BurstCompile] from OnUpdate so it runs as a normal
+        // managed main-thread method. The three inner IJobEntity structs
+        // (FollowAStarPathJob, FollowMacroPathJob, FollowFlowFieldJob) each keep their
+        // own [BurstCompile] and compile independently — no performance is lost on the
+        // hot path because all movement logic lives inside those Burst jobs.
         public void OnUpdate(ref SystemState state)
         {
             float dt = SystemAPI.Time.DeltaTime;
@@ -34,13 +47,14 @@ namespace Shek.ECSNavigation
             state.Dependency = macroJob.ScheduleParallel(state.Dependency);
 
             // Flow field followers — directions pre-sampled by FlowFieldSamplerSystem.
-            // Read the static BEFORE scheduling (we are on the main thread here;
-            // the job receives the NativeHashMap by value so Burst never touches the static).
+            // Reading the static HERE (main-thread OnUpdate, not Burst) is legal.
+            // The NativeHashMap is then passed to the Burst job as a plain field value.
             var sampledDirs = FlowFieldSamplerSystem.SampledDirections;
             bool sampledValid = sampledDirs.IsCreated;
             var emptyDirs = sampledValid
                 ? default(NativeHashMap<Entity, float2>)
                 : new NativeHashMap<Entity, float2>(0, Allocator.TempJob);
+
             var flowJob = new FollowFlowFieldJob
             {
                 DeltaTime = dt,
@@ -48,7 +62,12 @@ namespace Shek.ECSNavigation
                 SampledDirections = sampledValid ? sampledDirs : emptyDirs
             };
             state.Dependency = flowJob.ScheduleParallel(state.Dependency);
-            if (!sampledValid) { state.Dependency.Complete(); emptyDirs.Dispose(); }
+
+            if (!sampledValid)
+            {
+                state.Dependency.Complete();
+                emptyDirs.Dispose();
+            }
         }
 
         // ── A* Waypoint Follower ─────────────────────────────────────────
@@ -128,7 +147,6 @@ namespace Shek.ECSNavigation
                 if (movement.CurrentWaypointIndex >= macroPath.Length)
                 {
                     // Signal main thread to issue the final A* path request.
-                    // Writing nav fields directly is safe here (no ECB race).
                     nav.MacroPathDone = 1;
                     nav.Mode = NavMode.AStar;
                     movement.IsFollowingPath = 0;
@@ -162,11 +180,8 @@ namespace Shek.ECSNavigation
 
         // ── Flow Field Follower ──────────────────────────────────────────
 
-
-        // FIX: FollowFlowFieldJob now receives sampled directions via a NativeHashMap
-        // keyed by Entity. FlowFieldSamplerSystem (main thread, non-Burst) samples
-        // FlowFieldSystem.TrySampleField each frame and writes results here.
-        // The Burst job reads directions without needing to call managed code.
+        // Directions are pre-sampled on the main thread by FlowFieldSamplerSystem
+        // and passed in via SampledDirections. This job is pure Burst — no static access.
         [BurstCompile]
         partial struct FollowFlowFieldJob : IJobEntity
         {
@@ -187,7 +202,6 @@ namespace Shek.ECSNavigation
                 float dist = math.distance(currentPos, nav.Destination);
                 if (dist < nav.ArrivalThreshold) return;
 
-                // Use sampled flow field direction if available, else fall back to direct
                 float3 direction;
                 if (SampledDirections.TryGetValue(entity, out float2 fieldDir) &&
                     math.lengthsq(fieldDir) > 0.001f)
@@ -303,12 +317,10 @@ namespace Shek.ECSNavigation
         }
     }
 }
+
 namespace Shek.ECSNavigation
 {
     // ── Movement Event System ────────────────────────────────────────────────
-    // Runs after UnitMovementSystem. Compares IsFollowingPath against
-    // PreviousIsFollowingPath to detect 0->1 and 1->0 transitions and fire
-    // the one-shot StartedMoving / StoppedMoving events.
 
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateAfter(typeof(UnitMovementSystem))]
@@ -348,13 +360,7 @@ namespace Shek.ECSNavigation
     }
 
     // ── Movement Event Cleanup System ────────────────────────────────────────
-    // Runs at the end of the frame and disables StartedMoving / StoppedMoving
-    // so they are active for exactly one frame.
-    // [WithAll] on an IEnableableComponent filters to entities where it is ENABLED —
-    // this is the correct pattern; [WithAny] does NOT filter by enabled state.
 
-    // Cleanup runs on the main thread with direct SetComponentEnabled calls -
-    // no ECB, no playback timing ambiguity.
     [UpdateInGroup(typeof(LateSimulationSystemGroup))]
     public partial class MovementEventCleanupSystem : SystemBase
     {

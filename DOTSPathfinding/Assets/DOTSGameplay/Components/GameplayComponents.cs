@@ -1,4 +1,4 @@
-using Unity.Collections;
+ï»¿using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 
@@ -11,9 +11,9 @@ namespace Shek.ECSGameplay
     public struct UnitData : IComponentData
     {
         public FixedString64Bytes Name;
-        /// <summary>Capsule radius — used for melee slot geometry and target sizing.</summary>
+        /// <summary>Capsule radius ï¿½ used for melee slot geometry and target sizing.</summary>
         public float Radius;
-        /// <summary>Faction ID — units with matching factions do not attack each other.</summary>
+        /// <summary>Faction ID ï¿½ units with matching factions do not attack each other.</summary>
         public int FactionId;
     }
 
@@ -32,7 +32,7 @@ namespace Shek.ECSGameplay
         public int Max;
         /// <summary>HP per second regenerated when out of combat.</summary>
         public float RegenRate;
-        /// <summary>Seconds since last damage — regen begins after OutOfCombatDelay.</summary>
+        /// <summary>Seconds since last damage ï¿½ regen begins after OutOfCombatDelay.</summary>
         public float TimeSinceLastDamage;
         public float OutOfCombatDelay;
     }
@@ -118,6 +118,13 @@ namespace Shek.ECSGameplay
     public struct AIState : IComponentData
     {
         public UnitState State;
+        public UnitState LastState;
+        /// <summary>
+        /// The state the unit was in before entering Hit.
+        /// Used by HitRecoverySystem to restore correctly without re-triggering
+        /// animations that were already playing (e.g. looped Attack clip).
+        /// </summary>
+        public UnitState PreHitState;
         /// <summary>How long the current state has been active.</summary>
         public float StateTimer;
     }

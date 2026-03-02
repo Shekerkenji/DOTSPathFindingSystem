@@ -60,9 +60,17 @@ namespace Shek.ECSGameplay
 
             if (freshTargets.Length == 0) { freshTargets.Dispose(); return; }
 
+            // Copy into a TempJob-allocated NativeArray before scheduling.
+            // Allocator.Temp is only valid on the current stack frame; the job may
+            // not have started executing by the time the Temp allocator resets, so
+            // passing AsArray() directly causes the "owner invalidated" exception.
+            // Allocator.TempJob is safe across job boundaries (valid for 4 frames).
+            var pingArray = new NativeArray<PingEntry>(freshTargets.Length, Allocator.TempJob);
+            pingArray.CopyFrom(freshTargets.AsArray());
+            freshTargets.Dispose();
+
             // Apply pings to idle allies
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
-            var pingArray = freshTargets.AsArray();
 
             var job = new ApplyPingJob
             {
@@ -74,7 +82,7 @@ namespace Shek.ECSGameplay
 
             ecb.Playback(EntityManager);
             ecb.Dispose();
-            freshTargets.Dispose();
+            pingArray.Dispose();
         }
 
         [BurstCompile]

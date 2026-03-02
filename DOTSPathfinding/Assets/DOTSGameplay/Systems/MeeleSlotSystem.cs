@@ -1,4 +1,3 @@
-using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
@@ -10,18 +9,24 @@ namespace Shek.ECSGameplay
     /// Manages melee attacker slots around each target.
     ///
     /// Design:
-    ///   • Each target entity has a MeleeSlotComponent that tracks how many
-    ///     melee/ranged attackers currently occupy it.
-    ///   • When an attacker acquires a melee target it calls for a slot assignment.
-    ///     MeleeSlotSystem assigns the next free slot index (0..MaxMeleeSlots-1).
-    ///   • The orbit position for slot N is:
-    ///       angle = (N / TotalSlots) * 2?
-    ///       orbitPos = target.position + float3(cos(angle), 0, sin(angle)) * orbitRadius
-    ///   • orbitRadius = targetRadius + attackerRadius + weapon.Range * 0.5f
-    ///   • When an attacker loses its target or dies, slots are freed and the
-    ///     attacker count on the target is decremented.
+    ///   Each target entity has a MeleeSlotComponent tracking how many
+    ///   melee/ranged attackers currently occupy it.
     ///
-    /// Runs before AIDecisionSystem so slot counts are fresh for scoring.
+    ///   When an attacker acquires a melee target, this system assigns the next
+    ///   free slot index (0..MaxMeleeSlots-1) and writes MeleeSlotAssignment.
+    ///   The orbit angle for slot N is:
+    ///       angle = (N / TotalSlots) * 2 * PI
+    ///   AIDecisionSystem reads SlotIndex + TotalSlots to compute the actual
+    ///   world-space orbit position using the live target transform.
+    ///
+    ///   When an attacker loses or switches targets, slots are freed and
+    ///   attacker counts decremented.
+    ///
+    /// FIX: Removed ComputeOrbitPositionJob entirely. It was a no-op (only
+    /// re-assigned SlotIndex to itself) but it declared MeleeSlotAssignment
+    /// via both EnabledRefRO (read) and [WithAll] (which generates a RW handle),
+    /// causing the "aliasing" InvalidOperationException. Orbit math is now
+    /// handled inline in AIDecisionSystem which has the target transform anyway.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(AIDecisionSystem))]
@@ -35,36 +40,32 @@ namespace Shek.ECSGameplay
 
         protected override void OnUpdate()
         {
-            float time = (float)SystemAPI.Time.ElapsedTime;
-
-            // ?? 1. Decrement slot counts for attackers that lost their target ??
-
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
-            foreach (var (assignment, assignEnabled, currentTarget, entity) in
+            // 1. Release slots for attackers that lost or changed their target
+            foreach (var (assignment, assignEnabled, currentTarget, weapon, weaponEnabled, entity) in
                 SystemAPI.Query<
                     RefRO<MeleeSlotAssignment>,
                     EnabledRefRO<MeleeSlotAssignment>,
-                    RefRO<CurrentTarget>>()
+                    RefRO<CurrentTarget>,
+                    RefRO<Weapon>,
+                    EnabledRefRO<Weapon>>()
                     .WithEntityAccess())
             {
                 if (!assignEnabled.ValueRO) continue;
 
-                bool targetChanged = currentTarget.ValueRO.TargetEntity != assignment.ValueRO.TargetEntity;
-                bool targetLost = currentTarget.ValueRO.HasTarget == 0;
+                bool targetChanged = currentTarget.ValueRO.HasTarget == 0 ||
+                                     currentTarget.ValueRO.TargetEntity != assignment.ValueRO.TargetEntity;
+                if (!targetChanged) continue;
 
-                if (!targetChanged && !targetLost) continue;
-
-                // Release the slot on the old target
                 Entity oldTarget = assignment.ValueRO.TargetEntity;
                 if (EntityManager.Exists(oldTarget) &&
                     EntityManager.HasComponent<MeleeSlotComponent>(oldTarget))
                 {
                     var slots = EntityManager.GetComponentData<MeleeSlotComponent>(oldTarget);
-
-                    bool wasRanged = EntityManager.HasComponent<Weapon>(entity) &&
-                        (EntityManager.GetComponentData<Weapon>(entity).Type == WeaponType.Ranged ||
-                         EntityManager.GetComponentData<Weapon>(entity).Type == WeaponType.RangedAOE);
+                    bool wasRanged = weaponEnabled.ValueRO &&
+                        (weapon.ValueRO.Type == WeaponType.Ranged ||
+                         weapon.ValueRO.Type == WeaponType.RangedAOE);
 
                     if (wasRanged)
                         slots.CurrentRangedAttackers = math.max(0, slots.CurrentRangedAttackers - 1);
@@ -73,11 +74,11 @@ namespace Shek.ECSGameplay
 
                     ecb.SetComponent(oldTarget, slots);
                 }
+
                 ecb.SetComponentEnabled<MeleeSlotAssignment>(entity, false);
             }
 
-            // ?? 2. Assign slots for attackers that just acquired a new target ??
-
+            // 2. Assign slots for attackers that just acquired a new target
             foreach (var (currentTarget, weapon, weaponEnabled, assignEnabled, unitData, entity) in
                 SystemAPI.Query<
                     RefRO<CurrentTarget>,
@@ -95,19 +96,29 @@ namespace Shek.ECSGameplay
                 if (!EntityManager.Exists(targetEnt)) continue;
                 if (!EntityManager.HasComponent<MeleeSlotComponent>(targetEnt)) continue;
 
-                bool isRanged = weapon.ValueRO.Type == WeaponType.Ranged ||
-                                weapon.ValueRO.Type == WeaponType.RangedAOE;
+                bool isRanged = weaponEnabled.ValueRO &&
+                    (weapon.ValueRO.Type == WeaponType.Ranged ||
+                     weapon.ValueRO.Type == WeaponType.RangedAOE);
 
                 var slots = EntityManager.GetComponentData<MeleeSlotComponent>(targetEnt);
 
                 if (!isRanged && slots.CurrentMeleeAttackers >= slots.MaxMeleeSlots)
-                    continue; // No melee slot available — keep current target but wait
+                    continue; // No melee slot free — keep target but don't assign slot yet
 
-                if (!isRanged) slots.CurrentMeleeAttackers++;
-                else slots.CurrentRangedAttackers++;
-
-                int slotIndex = isRanged ? slots.CurrentRangedAttackers - 1 : slots.CurrentMeleeAttackers - 1;
-                int totalSlots = isRanged ? 8 : slots.MaxMeleeSlots;
+                int slotIndex;
+                int totalSlots;
+                if (isRanged)
+                {
+                    slotIndex = slots.CurrentRangedAttackers;
+                    totalSlots = 8;
+                    slots.CurrentRangedAttackers++;
+                }
+                else
+                {
+                    slotIndex = slots.CurrentMeleeAttackers;
+                    totalSlots = slots.MaxMeleeSlots;
+                    slots.CurrentMeleeAttackers++;
+                }
 
                 ecb.SetComponent(targetEnt, slots);
                 ecb.SetComponent(entity, new MeleeSlotAssignment
@@ -121,40 +132,6 @@ namespace Shek.ECSGameplay
 
             ecb.Playback(EntityManager);
             ecb.Dispose();
-
-            // ?? 3. Compute & write orbit positions (Burst) ????????????????????
-
-            var orbitJob = new ComputeOrbitPositionJob { };
-            Dependency = orbitJob.ScheduleParallel(Dependency);
-        }
-
-        /// <summary>
-        /// Computes the world-space orbit position this attacker should move toward.
-        /// Stored in MeleeSlotAssignment fields — read by AIDecisionSystem when
-        /// issuing NavigationMoveCommands for melee.
-        /// We write an OrbitTarget component which NavigationCommandSystem will pick up.
-        /// </summary>
-        [BurstCompile]
-        [WithAll(typeof(MeleeSlotAssignment))]
-        [WithDisabled(typeof(DeadTag))]
-        partial struct ComputeOrbitPositionJob : IJobEntity
-        {
-            void Execute(
-                ref MeleeSlotAssignment assignment,
-                EnabledRefRO<MeleeSlotAssignment> assignEnabled,
-                in LocalTransform transform,
-                in UnitData unitData,
-                in Weapon weapon)
-            {
-                if (!assignEnabled.ValueRO) return;
-                // Orbit angle for this slot
-                float angle = (float)assignment.SlotIndex / math.max(1, assignment.TotalSlots) * math.PI * 2f;
-                float2 dir2 = new float2(math.cos(angle), math.sin(angle));
-                // We store the angle so AIDecisionSystem can compute the actual
-                // orbit world-position once it has the target's transform.
-                // Nothing more needed here — the angle is deterministic from slot index.
-                assignment.SlotIndex = assignment.SlotIndex; // no-op but keeps job valid
-            }
         }
     }
 }

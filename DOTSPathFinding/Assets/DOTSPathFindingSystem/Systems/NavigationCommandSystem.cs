@@ -30,6 +30,7 @@ namespace Shek.ECSNavigation
     /// Works identically for 1 agent or 10,000 — the job is parallel and Burst compiled.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
+    [UpdateAfter(typeof(Shek.ECSGameplay.AIDecisionSystem))]
     [UpdateBefore(typeof(NavigationDispatchSystem))]
     [BurstCompile]
     public partial struct NavigationCommandSystem : ISystem
@@ -61,18 +62,20 @@ namespace Shek.ECSNavigation
             moveEcb.Dispose();
 
             // ── Stop commands ──────────────────────────────────────────────
+            // Chain after moveDep (not state.Dependency) so move and stop jobs
+            // never run concurrently — prevents data race on AgentNavigation/UnitMovement
+            // if an entity transiently has both commands enabled.
             var stopEcb = new EntityCommandBuffer(Allocator.TempJob);
             var stopJob = new ProcessStopCommandJob
             {
                 ECBWriter = stopEcb.AsParallelWriter()
             };
-            var stopDep = stopJob.ScheduleParallel(state.Dependency);
+            var stopDep = stopJob.ScheduleParallel(moveDep);
             stopDep.Complete();
             stopEcb.Playback(state.EntityManager);
             stopEcb.Dispose();
 
-            // Update state.Dependency to signal both jobs are done
-            state.Dependency = Unity.Jobs.JobHandle.CombineDependencies(moveDep, stopDep);
+            state.Dependency = stopDep;
         }
 
         // ── Move ────────────────────────────────────────────────────────────

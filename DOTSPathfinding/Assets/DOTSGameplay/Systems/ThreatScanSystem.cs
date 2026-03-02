@@ -11,26 +11,17 @@ namespace Shek.ECSGameplay
     /// Scans for enemies within detection radius, scores each candidate,
     /// and assigns the best target to CurrentTarget.
     ///
-    /// Scoring formula (lower = better target):
-    ///   score = dist * 1.0
-    ///         - meleePressure * 30        (prefer targets with fewer attackers)
-    ///         - lowHealthBonus * 20       (finish off weakened enemies)
-    ///         + los_penalty               (large penalty if LoS fails for ranged)
+    /// FIX 1: AllUnits is copied into NativeArray(Allocator.TempJob) before
+    /// ScheduleParallel so the scheduler owns the buffer lifetime.
+    /// The source NativeList (Allocator.Temp) is disposed immediately after copy.
     ///
-    /// LoS is checked via Physics.Raycast on the main thread before scheduling
-    /// the Burst job. The Burst job receives a pre-computed NativeHashSet of
-    /// visible entity pairs so it stays fully Burst-compiled.
-    ///
-    /// Runs in InitializationSystemGroup so results are ready before AI decisions.
+    /// FIX 2: Removed unused _candidates and _scanners fields.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(AIDecisionSystem))]
     public partial class ThreatScanSystem : SystemBase
     {
-        // Main-thread LoS results written here, read by inner Burst job.
         private NativeHashSet<LoSPair> _visiblePairs;
-        private NativeArray<TargetCandidate> _candidates;
-        private NativeArray<ScannerData> _scanners;
 
         protected override void OnCreate()
         {
@@ -47,26 +38,25 @@ namespace Shek.ECSGameplay
         {
             float time = (float)SystemAPI.Time.ElapsedTime;
 
-            // ── 1. Collect all live unit positions & faction data ──────────────
-
+            // 1. Collect all live unit snapshots
             int unitCount = 0;
-            foreach (var _ in SystemAPI.Query<RefRO<CurrentTarget>>()) unitCount++;
+            foreach (var _ in SystemAPI.Query<RefRO<CurrentTarget>>().WithDisabled<DeadTag>())
+                unitCount++;
 
             if (unitCount == 0) return;
 
-            var allUnits = new NativeList<UnitSnapshot>(unitCount, Allocator.Temp);
-            foreach (var (transform, unitData, health, slots, meleeAssign, meleeEnabled, entity) in
+            var allUnitsTemp = new NativeList<UnitSnapshot>(unitCount, Allocator.Temp);
+
+            foreach (var (transform, unitData, health, slots, entity) in
                 SystemAPI.Query<
                     RefRO<LocalTransform>,
                     RefRO<UnitData>,
                     RefRO<HealthComponent>,
-                    RefRO<MeleeSlotComponent>,
-                    RefRO<MeleeSlotAssignment>,
-                    EnabledRefRO<MeleeSlotAssignment>>()
+                    RefRO<MeleeSlotComponent>>()
                     .WithDisabled<DeadTag>()
                     .WithEntityAccess())
             {
-                allUnits.Add(new UnitSnapshot
+                allUnitsTemp.Add(new UnitSnapshot
                 {
                     Entity = entity,
                     Position = transform.ValueRO.Position,
@@ -78,53 +68,58 @@ namespace Shek.ECSGameplay
                 });
             }
 
-            // ── 2. Main-thread LoS raycasts (managed Physics API) ─────────────
-
+            // 2. Main-thread LoS raycasts (Physics API is managed, must run here)
             _visiblePairs.Clear();
 
-            foreach (var (transform, detection, target, weapon, entity) in
+            foreach (var (transform, detection, weapon, entity) in
                 SystemAPI.Query<
                     RefRO<LocalTransform>,
                     RefRO<DetectionComponent>,
-                    RefRO<CurrentTarget>,
                     RefRO<Weapon>>()
                     .WithDisabled<DeadTag>()
                     .WithEntityAccess())
             {
-                if (time < detection.ValueRO.NextScanTime) continue;
                 bool isRanged = weapon.ValueRO.Type == WeaponType.Ranged ||
                                 weapon.ValueRO.Type == WeaponType.RangedAOE;
-                if (!isRanged) continue;  // Melee doesn't need LoS
+                if (!isRanged) continue;
+                if (time < detection.ValueRO.NextScanTime) continue;
 
                 float3 fromPos = transform.ValueRO.Position + new float3(0, 1f, 0);
                 int layerMask = detection.ValueRO.ObstacleLayers;
                 float radius = detection.ValueRO.DetectionRadius;
 
-                for (int i = 0; i < allUnits.Length; i++)
+                for (int i = 0; i < allUnitsTemp.Length; i++)
                 {
-                    var candidate = allUnits[i];
+                    var candidate = allUnitsTemp[i];
                     if (candidate.Entity == entity) continue;
                     float dist = math.distance(fromPos, candidate.Position);
                     if (dist > radius) continue;
 
                     float3 toPos = candidate.Position + new float3(0, 1f, 0);
                     float3 dir3 = toPos - fromPos;
-                    var origin3 = new Vector3(fromPos.x, fromPos.y, fromPos.z);
-                    var dir3u = new Vector3(dir3.x, dir3.y, dir3.z);
+                    bool clear = !Physics.Raycast(
+                        new Vector3(fromPos.x, fromPos.y, fromPos.z),
+                        new Vector3(dir3.x, dir3.y, dir3.z).normalized,
+                        dist, layerMask);
 
-                    bool clear = !Physics.Raycast(origin3, dir3u.normalized, dist, layerMask);
                     if (clear)
                         _visiblePairs.Add(new LoSPair { Scanner = entity, Target = candidate.Entity });
                 }
             }
 
-            // ── 3. Burst job: score & assign ──────────────────────────────────
+            // 3. Copy to TempJob-allocated NativeArray before scheduling.
+            //    Allocator.Temp is only valid until the end of this frame's stack scope;
+            //    the job may not have started yet when the Temp allocator resets.
+            //    Allocator.TempJob persists for 4 frames and is safe across job boundaries.
+            var allUnits = new NativeArray<UnitSnapshot>(allUnitsTemp.Length, Allocator.TempJob);
+            allUnits.CopyFrom(allUnitsTemp.AsArray());
+            allUnitsTemp.Dispose();
 
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
             var job = new ScoreAndAssignJob
             {
-                AllUnits = allUnits.AsArray(),
+                AllUnits = allUnits,
                 VisiblePairs = _visiblePairs,
                 Time = time,
                 ECBWriter = ecb.AsParallelWriter()
@@ -137,9 +132,9 @@ namespace Shek.ECSGameplay
             allUnits.Dispose();
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // INNER JOB
-        // ─────────────────────────────────────────────────────────────────────
+        // -----------------------------------------------------------------
+        // SCORE AND ASSIGN JOB
+        // -----------------------------------------------------------------
 
         [BurstCompile]
         [WithDisabled(typeof(DeadTag))]
@@ -176,26 +171,23 @@ namespace Shek.ECSGameplay
                 {
                     var candidate = AllUnits[i];
                     if (candidate.Entity == entity) continue;
-                    if (candidate.FactionId == unitData.FactionId) continue; // Same faction
+                    if (candidate.FactionId == unitData.FactionId) continue;
 
                     float dist = math.distance(transform.Position, candidate.Position);
                     if (dist > scanRadius) continue;
 
-                    // LoS check for ranged — melee ignores LoS since they navigate to target
                     if (isRanged)
                     {
                         var pair = new LoSPair { Scanner = entity, Target = candidate.Entity };
                         if (!VisiblePairs.Contains(pair)) continue;
                     }
 
-                    // Scoring: lower is better
                     float meleePressure = candidate.MaxMeleeSlots > 0
-                        ? (float)candidate.MeleeSlots / candidate.MaxMeleeSlots
-                        : 0f;
+                        ? (float)candidate.MeleeSlots / candidate.MaxMeleeSlots : 0f;
 
                     float score = dist
-                                - meleePressure * 30f        // Prefer targets with open melee slots
-                                - (1f - candidate.HealthFrac) * 20f; // Prefer wounded targets
+                                - meleePressure * 30f
+                                - (1f - candidate.HealthFrac) * 20f;
 
                     if (score < bestScore)
                     {
@@ -205,32 +197,31 @@ namespace Shek.ECSGameplay
                     }
                 }
 
-                // Check if current target is still alive and in range
+                // Validate existing target still in chase range
                 if (currentTarget.HasTarget == 1)
                 {
-                    bool currentStillValid = false;
+                    bool valid = false;
                     for (int i = 0; i < AllUnits.Length; i++)
                     {
                         if (AllUnits[i].Entity != currentTarget.TargetEntity) continue;
-                        float dist = math.distance(transform.Position, AllUnits[i].Position);
-                        if (dist <= detection.ChaseRange) currentStillValid = true;
+                        if (math.distance(transform.Position, AllUnits[i].Position) <= detection.ChaseRange)
+                            valid = true;
                         break;
                     }
-                    if (!currentStillValid)
+                    if (!valid)
                     {
                         currentTarget.HasTarget = 0;
                         currentTarget.TargetEntity = Entity.Null;
                     }
                 }
 
-                // Only switch targets if a significantly better one is found
-                // (hysteresis: new target must score 15+ better than current)
+                // Hysteresis: only switch if new target scores 15+ better
                 if (bestEntity != Entity.Null)
                 {
                     bool shouldSwitch = currentTarget.HasTarget == 0;
+
                     if (!shouldSwitch && bestEntity != currentTarget.TargetEntity)
                     {
-                        // Compute current target's score for hysteresis comparison
                         float currentScore = float.MaxValue;
                         for (int i = 0; i < AllUnits.Length; i++)
                         {
@@ -256,9 +247,9 @@ namespace Shek.ECSGameplay
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
+        // -----------------------------------------------------------------
         // HELPER TYPES
-        // ─────────────────────────────────────────────────────────────────────
+        // -----------------------------------------------------------------
 
         public struct UnitSnapshot
         {
