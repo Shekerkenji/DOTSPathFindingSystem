@@ -3,9 +3,9 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
-using Shek.ECSGameplay;
+using Shek.ECSNavigation;
 
-namespace Shek.ECSNavigation
+namespace Shek.ECSGameplay
 {
     /// <summary>
     /// Pure ECS system — no MonoBehaviour.

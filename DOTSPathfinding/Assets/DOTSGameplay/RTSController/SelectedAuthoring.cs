@@ -1,7 +1,7 @@
 using Unity.Entities;
 using UnityEngine;
 
-namespace Shek.ECSNavigation
+namespace Shek.ECSGameplay
 {
     /// <summary>
     /// Add this component to any unit GameObject to make it selectable by the RTS controller.

@@ -1,4 +1,5 @@
 using Shek.ECSAnimation;
+using Unity.Burst;
 using Unity.Entities;
 using UnityEngine;
 
@@ -16,10 +17,12 @@ namespace Shek.ECSGameplay
     /// Runs after DamageSystem so death state is already written
     /// before we touch the AnimationController.
     /// </summary>
+    [BurstCompile]
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateAfter(typeof(DamageSystem))]
     public partial struct CombatAnimationSystem : ISystem
     {
+        [BurstCompile]
         public void OnUpdate(ref SystemState state)
         {
             foreach (var (controller, aiState) in
@@ -34,7 +37,6 @@ namespace Shek.ECSGameplay
                 switch (current)
                 {
                     case UnitState.Attacking:
-                        Debug.Log("CombatAnimationSystem: Attacking");
                         AnimationControllerAPI.Play(ref controller.ValueRW, 2);
                         break;
                     case UnitState.Dead:
