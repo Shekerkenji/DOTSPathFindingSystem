@@ -48,13 +48,13 @@ namespace Shek.ECSGameplay
                 health.ValueRW.Current = math.max(0, health.ValueRO.Current - incoming);
                 health.ValueRW.TimeSinceLastDamage = 0f;
 
-                // Signal hit animation (non-dead)
-                if (health.ValueRO.Current > 0 && aiState.ValueRO.State != UnitState.Dead)
-                {
-                    aiState.ValueRW.PreHitState = aiState.ValueRO.State; // remember what we were doing
-                    //aiState.ValueRW.State = UnitState.Hit;
-                    //aiState.ValueRW.StateTimer = 0f;
-                }
+                //// Signal hit animation (non-dead)
+                //if (health.ValueRO.Current > 0 && aiState.ValueRO.State != UnitState.Dead)
+                //{
+
+                //    //aiState.ValueRW.State = UnitState.Hit;
+                //    //aiState.ValueRW.StateTimer = 0f;
+                //}
 
                 // Death
                 if (health.ValueRO.Current <= 0 && aiState.ValueRO.State != UnitState.Dead)
@@ -111,33 +111,33 @@ namespace Shek.ECSGameplay
     /// After that, the unit returns to Idle or Attacking depending on whether
     /// it still has a target.
     /// </summary>
-    [UpdateInGroup(typeof(SimulationSystemGroup))]
-    [UpdateAfter(typeof(DamageSystem))]
-    public partial struct HitRecoverySystem : ISystem
-    {
-        private const float HitAnimDuration = 0.4f;
+    //[UpdateInGroup(typeof(SimulationSystemGroup))]
+    //[UpdateAfter(typeof(DamageSystem))]
+    //public partial struct HitRecoverySystem : ISystem
+    //{
+    //    private const float HitAnimDuration = 0.4f;
 
-        [BurstCompile]
-        public void OnUpdate(ref SystemState state)
-        {
-            float dt = SystemAPI.Time.DeltaTime;
+    //    [BurstCompile]
+    //    public void OnUpdate(ref SystemState state)
+    //    {
+    //        float dt = SystemAPI.Time.DeltaTime;
 
-            foreach (var (aiState, currentTarget) in
-                SystemAPI.Query<RefRW<AIState>, RefRO<CurrentTarget>>()
-                    .WithDisabled<DeadTag>())
-            {
-                if (aiState.ValueRO.State != UnitState.Hit) continue;
+    //        foreach (var (aiState, currentTarget) in
+    //            SystemAPI.Query<RefRW<AIState>, RefRO<CurrentTarget>>()
+    //                .WithDisabled<DeadTag>())
+    //        {
+    //            if (aiState.ValueRO.State != UnitState.Hit) continue;
 
-                aiState.ValueRW.StateTimer += dt;
-                if (aiState.ValueRO.StateTimer < HitAnimDuration) continue;
+    //            aiState.ValueRW.StateTimer += dt;
+    //            if (aiState.ValueRO.StateTimer < HitAnimDuration) continue;
 
-                // Recover — restore to what we were doing before the hit,
-                // not blindly to Attacking, so we don't re-trigger looped clips.
-                aiState.ValueRW.StateTimer = 0f;
-                aiState.ValueRW.State = aiState.ValueRO.PreHitState != UnitState.Hit
-                    ? aiState.ValueRO.PreHitState
-                    : (currentTarget.ValueRO.HasTarget == 1 ? UnitState.Attacking : UnitState.Idle);
-            }
-        }
-    }
+    //            // Recover — restore to what we were doing before the hit,
+    //            // not blindly to Attacking, so we don't re-trigger looped clips.
+    //            aiState.ValueRW.StateTimer = 0f;
+    //            aiState.ValueRW.State = aiState.ValueRO.PreHitState != UnitState.Hit
+    //                ? aiState.ValueRO.PreHitState
+    //                : (currentTarget.ValueRO.HasTarget == 1 ? UnitState.Attacking : UnitState.Idle);
+    //        }
+    //    }
+    //}
 }

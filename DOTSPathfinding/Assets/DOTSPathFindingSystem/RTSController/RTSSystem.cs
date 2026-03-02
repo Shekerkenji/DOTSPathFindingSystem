@@ -3,6 +3,7 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
+using Shek.ECSGameplay;
 
 namespace Shek.ECSNavigation
 {
@@ -15,55 +16,45 @@ namespace Shek.ECSNavigation
     ///   2. CAMERA   — moves Camera.main based on config state
     ///   3. SELECTION— click / box select, SetComponentEnabled<Selected> only
     ///   4. MOVE     — right-click raycast, SetComponentEnabled<NavigationMoveCommand>
+    ///                 Also enables PlayerControlled and clears CurrentTarget so the
+    ///                 AI does not override the player's order mid-move.
     ///
     /// ZERO STRUCTURAL CHANGES AT RUNTIME:
-    ///   Selected           — baked disabled by SelectedBaker
+    ///   Selected              — baked disabled by SelectedBaker
     ///   NavigationMoveCommand — baked disabled by UnitBaker
+    ///   PlayerControlled      — baked disabled by CombatAgentAuthoring
     ///   This system only toggles enabled bits and writes data.
     /// </summary>
     [UpdateInGroup(typeof(InitializationSystemGroup))]
     public partial class RTSSystem : SystemBase
     {
         // All units that have Selected in their archetype (enabled OR disabled).
-        // EntityQueryOptions.IgnoreComponentEnabledState lets the query match
-        // regardless of the enabled bit — we check it manually per entity.
         private EntityQuery _selectableQuery;
 
-        // Units with Selected currently ENABLED.
-        // DOTS automatically filters by enabled bit when the component appears
-        // in All[] WITHOUT IgnoreComponentEnabledState — no extra API call needed.
+        // All selected + moveable units (enabled state checked manually).
         private EntityQuery _selectedQuery;
 
         protected override void OnCreate()
         {
             RequireForUpdate<RTSConfig>();
 
-            // Match all archetypes that contain Selected — ignore enabled bit
             _selectableQuery = GetEntityQuery(new EntityQueryDesc
             {
                 All = new ComponentType[] { ComponentType.ReadOnly<LocalTransform>(),
-                                                ComponentType.ReadWrite<Selected>() },
+                                            ComponentType.ReadWrite<Selected>() },
                 Options = EntityQueryOptions.IgnoreComponentEnabledState
             });
 
-            // Match only entities whose Selected bit is currently ON.
-            // NavigationMoveCommand is included via IgnoreComponentEnabledState so
-            // the query matches regardless of its enabled bit — we still write to it
-            // per-entity in Phase4_MoveOrders.
             _selectedQuery = GetEntityQuery(new EntityQueryDesc
             {
                 All = new ComponentType[] { ComponentType.ReadOnly<LocalTransform>(),
-                                                ComponentType.ReadWrite<Selected>(),
-                                                ComponentType.ReadOnly<NavigationMoveCommand>() },
+                                            ComponentType.ReadWrite<Selected>(),
+                                            ComponentType.ReadOnly<NavigationMoveCommand>() },
                 Options = EntityQueryOptions.IgnoreComponentEnabledState
             });
         }
 
-        protected override void OnDestroy()
-        {
-            // EntityQuery is a struct — no IsCreated, no Dispose needed for
-            // queries obtained via GetEntityQuery (system owns their lifetime).
-        }
+        protected override void OnDestroy() { }
 
         protected override void OnUpdate()
         {
@@ -76,7 +67,6 @@ namespace Shek.ECSNavigation
         }
 
         // ── Phase 1: Input ─────────────────────────────────────────────────
-        // Static so it cannot accidentally access system members or Time property.
 
         private static void Phase1_ReadInput(ref RTSConfig cfg)
         {
@@ -90,7 +80,6 @@ namespace Shek.ECSNavigation
                              - (Input.GetKey(KeyCode.Q) ? 1f : 0f);
 
             cfg.ZoomInput = Input.GetAxis("Mouse ScrollWheel");
-
             cfg.MousePositionPx = new float2(Input.mousePosition.x, Input.mousePosition.y);
 
             cfg.LeftDown = Input.GetMouseButtonDown(0);
@@ -105,9 +94,6 @@ namespace Shek.ECSNavigation
 
         private static void Phase2_Camera(ref RTSConfig cfg)
         {
-            // FIX: use UnityEngine.Time.deltaTime explicitly.
-            // In a static method, bare 'Time' would resolve to Unity.Entities.SystemBase.Time
-            // which is instance-only and obsolete — UnityEngine.Time.deltaTime is correct here.
             float dt = UnityEngine.Time.deltaTime;
 
             if (math.any(cfg.PanInput != float2.zero))
@@ -133,8 +119,7 @@ namespace Shek.ECSNavigation
             Vector3 offset = rot * new Vector3(0f, 0f, -armLen);
 
             cam.transform.SetPositionAndRotation(
-                new Vector3(cfg.PivotPosition.x, 0f, cfg.PivotPosition.z) + offset,
-                rot);
+                new Vector3(cfg.PivotPosition.x, 0f, cfg.PivotPosition.z) + offset, rot);
         }
 
         // ── Phase 3: Selection ─────────────────────────────────────────────
@@ -144,33 +129,24 @@ namespace Shek.ECSNavigation
             Camera cam = Camera.main;
             if (cam == null) return;
 
-            // Track drag start
             if (cfg.LeftDown)
             {
                 cfg.DragStartPx = cfg.MousePositionPx;
                 cfg.IsDragging = false;
             }
 
-            // Promote to drag once cursor moves far enough
             if (cfg.LeftHeld && !cfg.IsDragging &&
                 math.distance(cfg.MousePositionPx, cfg.DragStartPx) > 6f)
-            {
                 cfg.IsDragging = true;
-            }
 
-            // Commit on mouse-up
             if (cfg.LeftUp)
             {
-                if (cfg.IsDragging)
-                    ExecuteBoxSelect(ref cfg, cam);
-                else
-                    ExecuteClickSelect(ref cfg, cam);
-
+                if (cfg.IsDragging) ExecuteBoxSelect(ref cfg, cam);
+                else ExecuteClickSelect(ref cfg, cam);
                 cfg.IsDragging = false;
             }
 
-            if (cfg.EscapeDown)
-                DeselectAll();
+            if (cfg.EscapeDown) DeselectAll();
         }
 
         private void ExecuteClickSelect(ref RTSConfig cfg, Camera cam)
@@ -183,6 +159,9 @@ namespace Shek.ECSNavigation
 
             for (int i = 0; i < entities.Length; i++)
             {
+                if (EntityManager.HasComponent<DeadTag>(entities[i]) &&
+                    EntityManager.IsComponentEnabled<DeadTag>(entities[i])) continue;
+
                 Vector3 sp = cam.WorldToScreenPoint(
                     new Vector3(transforms[i].Position.x,
                                 transforms[i].Position.y,
@@ -196,13 +175,10 @@ namespace Shek.ECSNavigation
             entities.Dispose();
             transforms.Dispose();
 
-            // Plain click without shift → clear first
             if (!cfg.ShiftHeld) DeselectAll();
-
             if (closest == Entity.Null) return;
 
             bool wasSelected = EntityManager.IsComponentEnabled<Selected>(closest);
-            // Shift on already-selected → deselect; everything else → select
             EntityManager.SetComponentEnabled<Selected>(closest,
                 cfg.ShiftHeld ? !wasSelected : true);
         }
@@ -219,6 +195,9 @@ namespace Shek.ECSNavigation
 
             for (int i = 0; i < entities.Length; i++)
             {
+                if (EntityManager.HasComponent<DeadTag>(entities[i]) &&
+                    EntityManager.IsComponentEnabled<DeadTag>(entities[i])) continue;
+
                 Vector3 sp = cam.WorldToScreenPoint(
                     new Vector3(transforms[i].Position.x,
                                 transforms[i].Position.y,
@@ -258,13 +237,19 @@ namespace Shek.ECSNavigation
 
             float3 click = new float3(hit.point.x, hit.point.y, hit.point.z);
 
-            // Query uses IgnoreComponentEnabledState so we must manually filter
-            // to only entities whose Selected bit is ON.
             var allEntities = _selectedQuery.ToEntityArray(Allocator.Temp);
-            var selectedList = new Unity.Collections.NativeList<Entity>(allEntities.Length, Allocator.Temp);
+            var selectedList = new NativeList<Entity>(allEntities.Length, Allocator.Temp);
+
             for (int i = 0; i < allEntities.Length; i++)
-                if (EntityManager.IsComponentEnabled<Selected>(allEntities[i]))
-                    selectedList.Add(allEntities[i]);
+            {
+                if (!EntityManager.IsComponentEnabled<Selected>(allEntities[i])) continue;
+
+                // Skip dead units
+                if (EntityManager.HasComponent<DeadTag>(allEntities[i]) &&
+                    EntityManager.IsComponentEnabled<DeadTag>(allEntities[i])) continue;
+
+                selectedList.Add(allEntities[i]);
+            }
             allEntities.Dispose();
 
             int count = selectedList.Length;
@@ -276,15 +261,52 @@ namespace Shek.ECSNavigation
 
             for (int i = 0; i < count; i++)
             {
+                Entity e = selectedList[i];
+
                 float ox = (i % cols - (cols - 1) * 0.5f) * spacing;
                 float oz = (i / cols - (rows - 1) * 0.5f) * spacing;
 
-                EntityManager.SetComponentEnabled<NavigationMoveCommand>(selectedList[i], true);
-                EntityManager.SetComponentData(selectedList[i], new NavigationMoveCommand
+                // Issue the navigation order
+                EntityManager.SetComponentEnabled<NavigationMoveCommand>(e, true);
+                EntityManager.SetComponentData(e, new NavigationMoveCommand
                 {
                     Destination = click + new float3(ox, 0f, oz),
                     Priority = 1
                 });
+
+                // PLAYER OVERRIDE:
+                // Enable PlayerControlled so ThreatScanSystem and AIDecisionSystem
+                // both skip this unit until it reaches its destination.
+                if (EntityManager.HasComponent<PlayerControlled>(e))
+                    EntityManager.SetComponentEnabled<PlayerControlled>(e, true);
+
+                // Reset AIState to Moving so MovementAnimationSystem plays the
+                // walk clip correctly instead of the frozen Attacking state.
+                if (EntityManager.HasComponent<AIState>(e))
+                {
+                    var aiState = EntityManager.GetComponentData<AIState>(e);
+                    aiState.LastState = aiState.State;
+                    aiState.State = UnitState.Moving;
+                    aiState.StateTimer = 0f;
+                    EntityManager.SetComponentData(e, aiState);
+                }
+
+                // Clear existing target so the unit doesn't snap back to attacking
+                // the moment AIDecisionSystem would otherwise fire this frame.
+                if (EntityManager.HasComponent<CurrentTarget>(e))
+                {
+                    EntityManager.SetComponentData(e, new CurrentTarget
+                    {
+                        TargetEntity = Entity.Null,
+                        LastKnownPosition = default,
+                        HasTarget = 0
+                    });
+                }
+
+                // Release melee slot assignment so the target's slot counter
+                // is freed up and other units can fill it.
+                if (EntityManager.HasComponent<MeleeSlotAssignment>(e))
+                    EntityManager.SetComponentEnabled<MeleeSlotAssignment>(e, false);
             }
 
             Debug.Log($"[RTSSystem] Move → {hit.point:F1}  ({count} unit(s))");
@@ -294,10 +316,6 @@ namespace Shek.ECSNavigation
 
     // ── Gizmo bridge ──────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Spawns a hidden MonoBehaviour solely to receive OnDrawGizmos callbacks.
-    /// The bridge queries ECS directly — no data stored in the MonoBehaviour.
-    /// </summary>
     [UpdateInGroup(typeof(InitializationSystemGroup))]
     [UpdateAfter(typeof(RTSSystem))]
     public partial class RTSGizmoSystem : SystemBase
@@ -305,7 +323,7 @@ namespace Shek.ECSNavigation
         private RTSGizmoBridge _bridge;
 
         protected override void OnCreate() => RequireForUpdate<RTSConfig>();
-        protected override void OnUpdate() { }  // bridge handles gizmos
+        protected override void OnUpdate() { }
 
         protected override void OnStartRunning()
         {
@@ -334,7 +352,7 @@ namespace Shek.ECSNavigation
             var q = em.CreateEntityQuery(new EntityQueryDesc
             {
                 All = new ComponentType[] { ComponentType.ReadOnly<LocalTransform>(),
-                                                ComponentType.ReadWrite<Selected>() },
+                                            ComponentType.ReadWrite<Selected>() },
                 Options = EntityQueryOptions.IgnoreComponentEnabledState
             });
 

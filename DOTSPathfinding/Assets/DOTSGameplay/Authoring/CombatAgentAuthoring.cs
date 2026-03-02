@@ -1,4 +1,4 @@
-using Unity.Entities;
+ï»¿using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -6,7 +6,7 @@ namespace Shek.ECSGameplay
 {
     /// <summary>
     /// Add to any GameObject that is a combat-capable unit.
-    /// Works alongside DotsNavAgentAuthoring — both can live on the same prefab.
+    /// Works alongside DotsNavAgentAuthoring ï¿½ both can live on the same prefab.
     /// </summary>
     public class CombatAgentAuthoring : MonoBehaviour
     {
@@ -122,7 +122,7 @@ namespace Shek.ECSGameplay
             AddComponent(entity, new MeleeSlotAssignment());
             SetComponentEnabled<MeleeSlotAssignment>(entity, false);
 
-            // One-shot event components — disabled at spawn
+            // One-shot event components ï¿½ disabled at spawn
             AddComponent(entity, new AttackHitEvent());
             SetComponentEnabled<AttackHitEvent>(entity, false);
 
@@ -131,6 +131,10 @@ namespace Shek.ECSGameplay
 
             AddComponent(entity, new DeadTag());
             SetComponentEnabled<DeadTag>(entity, false);
+
+            // Player override tag â€” disabled at spawn, enabled by RTSSystem on move order
+            AddComponent(entity, new PlayerControlled());
+            SetComponentEnabled<PlayerControlled>(entity, false);
         }
     }
 }

@@ -77,6 +77,7 @@ namespace Shek.ECSGameplay
                     RefRO<DetectionComponent>,
                     RefRO<Weapon>>()
                     .WithDisabled<DeadTag>()
+                    .WithDisabled<PlayerControlled>()
                     .WithEntityAccess())
             {
                 bool isRanged = weapon.ValueRO.Type == WeaponType.Ranged ||
@@ -138,6 +139,7 @@ namespace Shek.ECSGameplay
 
         [BurstCompile]
         [WithDisabled(typeof(DeadTag))]
+        [WithDisabled(typeof(PlayerControlled))]  // player-commanded units don't acquire new targets
         partial struct ScoreAndAssignJob : IJobEntity
         {
             [ReadOnly] public NativeArray<UnitSnapshot> AllUnits;

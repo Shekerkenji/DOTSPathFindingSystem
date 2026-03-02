@@ -73,6 +73,7 @@ namespace Shek.ECSGameplay
 
         [BurstCompile]
         [WithDisabled(typeof(DeadTag))]
+        [WithDisabled(typeof(PlayerControlled))]  // player-commanded units skip AI entirely
         partial struct AIDecisionJob : IJobEntity
         {
             public float Time;
