@@ -3,19 +3,26 @@ using Unity.Mathematics;
 using Unity.Collections;
 using Unity.Burst;
 
+using Shek.ECSGrid; // GridChunk, ChunkStaticData, ChunkStaticBlob, GridManagerSystem
+
 namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Manages flow fields: one field per destination cluster.
     /// Fields are built once and shared across all agents moving to that destination.
     /// O(1) per agent per frame for movement — cost is in build, not sampling.
+    ///
+    /// Grid types (GridChunk, ChunkStaticData, etc.) live in Shek.ECSGrid.
+    /// Navigation config (NavigationConfig) lives in Shek.ECSNavigation.
+    /// ChunkManagerSystem is a static shim that forwards coordinate math to
+    /// GridManagerSystem using a NavigationConfig → GridConfig conversion.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(UnitMovementSystem))]
     [UpdateAfter(typeof(AStarSystem))]
     public partial class FlowFieldSystem : SystemBase
     {
-        private const float FieldExpiry = 5f; // Reduced so fields rebuild quickly after bake changes
+        private const float FieldExpiry = 5f;
         private NativeHashMap<ulong, Entity> _fieldRegistry;
 
         protected override void OnCreate()
@@ -40,9 +47,10 @@ namespace Shek.ECSNavigation
             var config = SystemAPI.GetSingleton<NavigationConfig>();
             float time = (float)SystemAPI.Time.ElapsedTime;
 
-            // 1. Collect unique destinations from FlowField-mode agents
+            // ── 1. Collect unique destinations from FlowField-mode agents ─────
             var destinationSet = new NativeHashMap<ulong, float3>(32, Allocator.Temp);
-            foreach (var (nav, followerEnabled) in SystemAPI.Query<RefRO<AgentNavigation>, EnabledRefRO<FlowFieldFollower>>())
+            foreach (var (nav, followerEnabled) in
+                SystemAPI.Query<RefRO<AgentNavigation>, EnabledRefRO<FlowFieldFollower>>())
             {
                 if (nav.ValueRO.HasDestination == 0) continue;
                 ulong key = DestinationHash(nav.ValueRO.Destination, config);
@@ -50,7 +58,7 @@ namespace Shek.ECSNavigation
                     destinationSet[key] = nav.ValueRO.Destination;
             }
 
-            // 2. Build or refresh fields
+            // ── 2. Build or refresh fields (centre chunk + 8 neighbours) ──────
             foreach (var kvp in destinationSet)
             {
                 ulong destHash = kvp.Key;
@@ -62,17 +70,20 @@ namespace Shek.ECSNavigation
                     for (int dz = -1; dz <= 1; dz++)
                     {
                         if (dx == 0 && dz == 0) continue;
-                        BuildOrRefreshField(destHash, destWorld, destChunk + new int2(dx, dz), config, time);
+                        BuildOrRefreshField(destHash, destWorld,
+                            destChunk + new int2(dx, dz), config, time);
                     }
             }
 
-            // 3. Expire old fields
+            // ── 3. Expire old fields ──────────────────────────────────────────
             var ecb = new EntityCommandBuffer(Allocator.Temp);
-            foreach (var (field, entity) in SystemAPI.Query<RefRW<FlowFieldData>>().WithEntityAccess())
+            foreach (var (field, entity) in
+                SystemAPI.Query<RefRW<FlowFieldData>>().WithEntityAccess())
             {
                 if (time - field.ValueRO.BuildTime > FieldExpiry)
                 {
-                    _fieldRegistry.Remove(FieldKey(field.ValueRO.DestinationHash, field.ValueRO.ChunkCoord));
+                    _fieldRegistry.Remove(
+                        FieldKey(field.ValueRO.DestinationHash, field.ValueRO.ChunkCoord));
                     if (field.ValueRO.Vectors.IsCreated) field.ValueRW.Vectors.Dispose();
                     if (field.ValueRO.Integration.IsCreated) field.ValueRW.Integration.Dispose();
                     ecb.DestroyEntity(entity);
@@ -82,6 +93,8 @@ namespace Shek.ECSNavigation
             ecb.Dispose();
             destinationSet.Dispose();
         }
+
+        // ── Field build / refresh ─────────────────────────────────────────────
 
         private void BuildOrRefreshField(ulong destHash, float3 destWorld, int2 chunkCoord,
                                           NavigationConfig config, float time)
@@ -95,13 +108,19 @@ namespace Shek.ECSNavigation
                 if (data.IsReady == 1 && (time - data.BuildTime) < FieldExpiry) return;
             }
 
-            // Find chunk blob
+            // Find chunk blob (GridChunk and ChunkStaticData are ECSGrid types)
             BlobAssetReference<ChunkStaticBlob> blob = default;
             bool found = false;
-            foreach (var (chunk, staticData) in SystemAPI.Query<RefRO<GridChunk>, RefRO<ChunkStaticData>>())
+            foreach (var (chunk, staticData) in
+                SystemAPI.Query<RefRO<GridChunk>, RefRO<ChunkStaticData>>())
             {
-                if (math.all(chunk.ValueRO.ChunkCoord == chunkCoord) && chunk.ValueRO.StaticDataReady == 1)
-                { blob = staticData.ValueRO.Blob; found = true; break; }
+                if (math.all(chunk.ValueRO.ChunkCoord == chunkCoord) &&
+                    chunk.ValueRO.StaticDataReady == 1)
+                {
+                    blob = staticData.ValueRO.Blob;
+                    found = true;
+                    break;
+                }
             }
             if (!found) return;
 
@@ -143,12 +162,14 @@ namespace Shek.ECSNavigation
             EntityManager.SetComponentData(fieldEntity, field);
         }
 
+        // ── Public sample API (called by FlowFieldSamplerSystem) ─────────────
+
         /// <summary>
-        /// Sample a flow field vector for an agent. Returns false if no field available.
-        /// Call from UnitMovementSystem or a dedicated sampler system.
+        /// Sample a flow field vector for an agent at <paramref name="worldPos"/>.
+        /// Returns false if no field is available for this destination/chunk.
         /// </summary>
-        public bool TrySampleField(ulong destHash, float3 worldPos, NavigationConfig config,
-                                    out float2 direction)
+        public bool TrySampleField(ulong destHash, float3 worldPos,
+                                    NavigationConfig config, out float2 direction)
         {
             direction = float2.zero;
             int2 chunkCoord = ChunkManagerSystem.WorldToChunkCoord(worldPos, config);
@@ -169,9 +190,13 @@ namespace Shek.ECSNavigation
             return math.lengthsq(direction) > 0.001f;
         }
 
+        // ── Hashing utilities ─────────────────────────────────────────────────
+
         public static ulong DestinationHash(float3 pos, NavigationConfig config)
         {
-            int2 cell = new int2((int)math.floor(pos.x / config.CellSize), (int)math.floor(pos.z / config.CellSize));
+            int2 cell = new int2(
+                (int)math.floor(pos.x / config.CellSize),
+                (int)math.floor(pos.z / config.CellSize));
             return (ulong)((long)cell.x << 32 | (uint)cell.y);
         }
 
@@ -182,9 +207,9 @@ namespace Shek.ECSNavigation
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // BURST COMPILED FLOW FIELD BUILD JOB
-    // ─────────────────────────────────────────────────────────────────────────
+    // =========================================================================
+    // FLOW FIELD BUILD JOB  (Burst compiled, no ECS access)
+    // =========================================================================
 
     [BurstCompile]
     public struct FlowFieldBuildJob
@@ -202,10 +227,10 @@ namespace Shek.ECSNavigation
             int cellCount = blob.CellCount;
             int total = cellCount * cellCount;
 
-            // Phase 1: Reset
+            // ── Phase 1: Reset ────────────────────────────────────────────────
             for (int i = 0; i < total; i++) Integration[i] = int.MaxValue;
 
-            // Phase 2: Dijkstra wavefront from goal
+            // ── Phase 2: Dijkstra wavefront from goal ─────────────────────────
             int2 goalLocal = ChunkManagerSystem.WorldToCellLocal(DestWorld, ChunkCoord, Config);
             goalLocal = math.clamp(goalLocal, int2.zero, new int2(cellCount - 1, cellCount - 1));
             int goalIdx = ChunkManagerSystem.CellLocalToIndex(goalLocal, cellCount);
@@ -240,13 +265,12 @@ namespace Shek.ECSNavigation
             }
             queue.Dispose();
 
-            // Phase 3: Gradient → direction vectors
-            // FIX: Only consider walkable neighbours when computing gradient direction.
-            // Previously unwalkable neighbours could have lower integration costs
-            // (from being adjacent to the goal) causing vectors to point into walls.
+            // ── Phase 3: Gradient → direction vectors ─────────────────────────
+            // Only walkable neighbours are considered so vectors never point into walls.
             for (int idx = 0; idx < total; idx++)
             {
                 if (Integration[idx] == int.MaxValue) { Vectors[idx] = float2.zero; continue; }
+
                 int2 local = new int2(idx % cellCount, idx / cellCount);
                 float2 bestDir = float2.zero;
                 int bestCost = Integration[idx];
@@ -258,8 +282,7 @@ namespace Shek.ECSNavigation
                         int2 n = local + new int2(dx, dz);
                         if (n.x < 0 || n.x >= cellCount || n.y < 0 || n.y >= cellCount) continue;
                         int nIdx = ChunkManagerSystem.CellLocalToIndex(n, cellCount);
-                        // FIX: skip unwalkable neighbours — vectors must never point into walls
-                        if (blob.Nodes[nIdx].WalkableLayerMask == 0) continue;
+                        if (blob.Nodes[nIdx].WalkableLayerMask == 0) continue; // never point into walls
                         if (Integration[nIdx] < bestCost)
                         { bestCost = Integration[nIdx]; bestDir = math.normalize(new float2(dx, dz)); }
                     }

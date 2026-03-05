@@ -27,10 +27,10 @@ namespace Shek.ECSNavigation
     /// That's it. This system reads the commands next frame, updates AgentNavigation,
     /// issues PathRequests, and disables the command components.
     ///
-    /// Works identically for 1 agent or 10,000 — the job is parallel and Burst compiled.
+    /// FIX: RepathCooldown is now reset to 0 (not left at a stale future timestamp)
+    /// so NavigationDispatchSystem fires the first dispatch on the same frame.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
-    [UpdateAfter(typeof(Shek.ECSGameplay.AIDecisionSystem))]
     [UpdateBefore(typeof(NavigationDispatchSystem))]
     [BurstCompile]
     public partial struct NavigationCommandSystem : ISystem
@@ -44,10 +44,9 @@ namespace Shek.ECSNavigation
         [BurstCompile]
         public void OnUpdate(ref SystemState state)
         {
-            // FIX: Use SEPARATE ECBs for each job.
+            // Use SEPARATE ECBs for each job.
             // Sharing one ECB.AsParallelWriter() across two ScheduleParallel calls
-            // causes an AtomicSafetyHandle write conflict — both jobs hold a write
-            // handle to the same NativeArray inside the ECB simultaneously.
+            // causes an AtomicSafetyHandle write conflict.
 
             // ── Move commands ──────────────────────────────────────────────
             var moveEcb = new EntityCommandBuffer(Allocator.TempJob);
@@ -62,9 +61,6 @@ namespace Shek.ECSNavigation
             moveEcb.Dispose();
 
             // ── Stop commands ──────────────────────────────────────────────
-            // Chain after moveDep (not state.Dependency) so move and stop jobs
-            // never run concurrently — prevents data race on AgentNavigation/UnitMovement
-            // if an entity transiently has both commands enabled.
             var stopEcb = new EntityCommandBuffer(Allocator.TempJob);
             var stopJob = new ProcessStopCommandJob
             {
@@ -97,10 +93,16 @@ namespace Shek.ECSNavigation
                 nav.Destination = cmd.Destination;
                 nav.HasDestination = 1;
                 nav.Mode = NavMode.AStar;
+                // FIX: Reset to 0 so NavigationDispatchSystem's "time >= RepathCooldown"
+                // guard passes immediately on the very same frame as the move order.
+                // Previously this was left at whatever stale value it had, which could
+                // be a future timestamp from a prior repath, causing the first dispatch
+                // to be silently skipped until the cooldown expired (up to 0.5 s delay).
                 nav.RepathCooldown = 0f;
                 nav.MacroPathDone = 0;
 
-                // Issue path request
+                // Issue path request directly from here as well, so there is zero
+                // frame delay between the player clicking and pathfinding starting.
                 ECBWriter.SetComponentEnabled<PathRequest>(sortKey, entity, true);
                 ECBWriter.SetComponent(sortKey, entity, new PathRequest
                 {

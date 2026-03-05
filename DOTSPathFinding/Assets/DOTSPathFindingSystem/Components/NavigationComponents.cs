@@ -2,76 +2,39 @@
 using Unity.Mathematics;
 using Unity.Collections;
 
+// Grid primitives (GridChunk, ChunkStaticData, NodeStatic, StreamingAnchor, etc.)
+// now live in Shek.ECSGrid. Navigation merely consumes them.
+using Shek.ECSGrid;
+
 namespace Shek.ECSNavigation
 {
-    // ─────────────────────────────────────────────
-    // GRID & CHUNK COMPONENTS
-    // ─────────────────────────────────────────────
+    // =========================================================================
+    // NAVIGATION CONFIG
+    // Lightweight — only nav-specific knobs. Grid knobs live in GridConfig.
+    // =========================================================================
 
+    /// <summary>
+    /// Navigation-specific singleton baked by NavigationConfigAuthoring.
+    /// Grid geometry (cell size, chunk size, physics layers) comes from GridConfig.
+    /// </summary>
     public struct NavigationConfig : IComponentData
     {
+        // These mirror GridConfig values so Burst jobs can be given a single config
+        // struct without reaching for two singletons. Populated by NavigationConfigBaker.
         public float CellSize;
         public int ChunkCellCount;
-        public int GhostRingRadius;
-        public int ActiveRingRadius;
         public float AgentRadius;
         public int UnwalkablePhysicsLayer;
         public int GroundPhysicsLayer;
         public float MaxSlopeAngle;
         public float BakeRaycastHeight;
+        public int GhostRingRadius;
+        public int ActiveRingRadius;
     }
 
-    public struct NodeStatic
-    {
-        public byte WalkableLayerMask;
-        public byte TerrainCostMask;
-        public byte SlopeFlags;
-        public byte Reserved;
-    }
-
-    public struct NodeDynamic
-    {
-        public byte OccupancyCount;
-        public byte DynamicBlockFlags;
-        public short Reserved;
-    }
-
-    public enum ChunkState : byte
-    {
-        Unloaded = 0,
-        Ghost = 1,
-        Active = 2
-    }
-
-    public struct GridChunk : IComponentData
-    {
-        public int2 ChunkCoord;
-        public ChunkState State;
-        public byte StaticDataReady;
-    }
-
-    public struct ChunkStaticBlob
-    {
-        public BlobArray<NodeStatic> Nodes;
-        public int2 ChunkCoord;
-        public int CellCount;
-        public BlobArray<byte> MacroConnectivity;
-    }
-
-    public struct ChunkStaticData : IComponentData
-    {
-        public BlobAssetReference<ChunkStaticBlob> Blob;
-    }
-
-    public struct ChunkDynamicData : IComponentData
-    {
-        public NativeArray<NodeDynamic> Nodes;
-        public byte IsAllocated;
-    }
-
-    // ─────────────────────────────────────────────
-    // UNIT / AGENT COMPONENTS
-    // ─────────────────────────────────────────────
+    // =========================================================================
+    // AGENT COMPONENTS
+    // =========================================================================
 
     [ChunkSerializable]
     public struct UnitLayerPermissions : IComponentData
@@ -102,10 +65,9 @@ namespace Shek.ECSNavigation
         public byte HasDestination;
 
         /// <summary>
-        /// Set to 1 by FollowMacroPathJob when the macro path is finished.
+        /// Set to 1 by FollowMacroPathJob when the macro path is complete.
         /// Read and cleared by NavigationDispatchSystem on the main thread,
         /// which then issues the final A* PathRequest.
-        /// Avoids needing an ECB inside the Burst job.
         /// </summary>
         public byte MacroPathDone;
     }
@@ -119,13 +81,15 @@ namespace Shek.ECSNavigation
         public int CurrentWaypointIndex;
         public byte IsFollowingPath;
         /// <summary>
-        /// Written by MovementEventSystem each frame after firing events.
-        /// Stores the value of IsFollowingPath from the previous frame so the
-        /// event system can detect 0→1 and 1→0 transitions without polling.
-        /// Do not write this from anywhere else.
+        /// Tracks previous frame value for start/stop event detection.
+        /// Only MovementEventSystem should write this.
         /// </summary>
         public byte PreviousIsFollowingPath;
     }
+
+    // =========================================================================
+    // PATH BUFFERS
+    // =========================================================================
 
     public struct PathWaypoint : IBufferElementData
     {
@@ -138,9 +102,9 @@ namespace Shek.ECSNavigation
         public float3 WorldEntryPoint;
     }
 
-    // ─────────────────────────────────────────────
+    // =========================================================================
     // FLOW FIELD COMPONENTS
-    // ─────────────────────────────────────────────
+    // =========================================================================
 
     public struct FlowFieldRegistry : IComponentData
     {
@@ -165,9 +129,9 @@ namespace Shek.ECSNavigation
         public int FieldId;
     }
 
-    // ─────────────────────────────────────────────
-    // PATHFINDING REQUEST / RESULT
-    // ─────────────────────────────────────────────
+    // =========================================================================
+    // PATH REQUEST / RESULT
+    // =========================================================================
 
     [ChunkSerializable]
     public struct PathRequest : IComponentData, IEnableableComponent
@@ -182,9 +146,9 @@ namespace Shek.ECSNavigation
     public struct PathfindingFailed : IComponentData, IEnableableComponent { }
     public struct NeedsRepath : IComponentData, IEnableableComponent { }
 
-    // ─────────────────────────────────────────────
+    // =========================================================================
     // A* INTERNALS
-    // ─────────────────────────────────────────────
+    // =========================================================================
 
     public struct AStarNode : System.IComparable<AStarNode>
     {
@@ -202,41 +166,9 @@ namespace Shek.ECSNavigation
         }
     }
 
-    // ─────────────────────────────────────────────
-    // CHUNK STREAMING REQUESTS
-    // ─────────────────────────────────────────────
-
-    public struct ChunkTransitionRequest : IComponentData, IEnableableComponent
-    {
-        public int2 ChunkCoord;
-        public ChunkState TargetState;
-    }
-
-    [ChunkSerializable]
-    public struct StreamingAnchor : IComponentData
-    {
-        public float3 WorldPosition;
-        public int2 CurrentChunkCoord;
-        public int Priority;
-    }
-
-    // ─────────────────────────────────────────────
-    // TERRAIN COST TABLE
-    // ─────────────────────────────────────────────
-
-    public struct TerrainCostTable : IComponentData
-    {
-        public BlobAssetReference<TerrainCostBlob> Blob;
-    }
-
-    public struct TerrainCostBlob
-    {
-        public BlobArray<int> Costs;
-    }
-
-    // ─────────────────────────────────────────────
+    // =========================================================================
     // STUCK DETECTION
-    // ─────────────────────────────────────────────
+    // =========================================================================
 
     [ChunkSerializable]
     public struct StuckDetection : IComponentData
@@ -249,9 +181,9 @@ namespace Shek.ECSNavigation
         public int MaxStuckCount;
     }
 
-    // ─────────────────────────────────────────────
+    // =========================================================================
     // NAVIGATION COMMANDS
-    // ─────────────────────────────────────────────
+    // =========================================================================
 
     [ChunkSerializable]
     public struct NavigationMoveCommand : IComponentData, IEnableableComponent
@@ -262,8 +194,10 @@ namespace Shek.ECSNavigation
 
     public struct NavigationStopCommand : IComponentData, IEnableableComponent { }
 
+    // =========================================================================
+    // MOVEMENT EVENTS
+    // =========================================================================
+
     public struct StartedMoving : IComponentData, IEnableableComponent { }
     public struct StoppedMoving : IComponentData, IEnableableComponent { }
-
-
 }

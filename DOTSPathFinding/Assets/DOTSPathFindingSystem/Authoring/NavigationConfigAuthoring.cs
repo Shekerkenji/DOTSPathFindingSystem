@@ -1,84 +1,68 @@
 ﻿using Unity.Entities;
-using Unity.Collections;
 using UnityEngine;
+
+// Grid config lives in ECSGrid — we reference it but don't duplicate it.
+using Shek.ECSGrid;
 
 namespace Shek.ECSNavigation
 {
     /// <summary>
-    /// Place on an empty GameObject — one per scene.
-    /// Configures the entire navigation system.
+    /// Place ONE of these on the same (or a different) GameObject alongside
+    /// GridConfigAuthoring. It bakes only the NavigationConfig singleton —
+    /// all grid geometry is owned by GridConfig / GridConfigAuthoring.
+    ///
+    /// The baker copies shared fields (CellSize, ChunkCellCount, etc.) from
+    /// GridConfigAuthoring so navigation Burst jobs can receive a single
+    /// NavigationConfig without fetching two singletons.
+    ///
+    /// Also bakes the FlowFieldRegistry singleton required by FlowFieldSystem.
     /// </summary>
     public class NavigationConfigAuthoring : MonoBehaviour
     {
-        [Header("Grid")]
-        [Tooltip("World units per grid cell. Smaller = more precise but more memory and bake time.")]
-        public float cellSize = 1f;
+        [Header("Grid Reference")]
+        [Tooltip(
+            "Drag the GameObject that has GridConfigAuthoring here. " +
+            "Navigation will mirror its geometry settings at bake time.")]
+        public GridConfigAuthoring gridConfig;
 
-        [Tooltip("Cells per chunk side. 64 → 64×64 = 4096 cells. Affects memory granularity.")]
-        public int chunkCellCount = 64;
-
-        [Header("Streaming")]
-        [Tooltip("Chunks fully simulated around the streaming anchor (player).")]
-        public int activeRingRadius = 2;
-
-        [Tooltip("Chunks kept in ghost state (walkability only, no simulation) beyond active ring.")]
-        public int ghostRingRadius = 6;
-
-        [Header("Baking")]
-        [Tooltip("Agent capsule radius — used for obstacle clearance checks during bake.")]
-        public float agentRadius = 0.5f;
-
-        [Tooltip("Physics layer(s) treated as solid obstacles (walls, rocks, buildings).")]
-        public LayerMask unwalkableLayer;
-
-        [Tooltip("Physics layer(s) treated as walkable ground surface.")]
-        public LayerMask groundLayer;
-
-        [Tooltip("Slopes steeper than this angle are impassable for ground units.")]
-        [Range(0f, 90f)]
-        public float maxSlopeAngle = 45f;
-
-        [Tooltip("How high above each cell centre to start the downward bake raycast.")]
-        public float bakeRaycastHeight = 5f;
+        // If you ever want navigation-specific overrides that differ from the
+        // global grid config, add them here. For now we just re-expose the
+        // grid authoring so the baker can read it directly.
     }
 
     public class NavigationConfigBaker : Baker<NavigationConfigAuthoring>
     {
-        public override void Bake(NavigationConfigAuthoring authoring)
+        public override void Bake(NavigationConfigAuthoring auth)
         {
+            if (auth.gridConfig == null)
+            {
+                Debug.LogError(
+                    "[NavigationConfigAuthoring] No GridConfigAuthoring assigned. " +
+                    "Navigation config will not be baked.");
+                return;
+            }
+
+            var g = auth.gridConfig;     // shorthand
+
             var entity = GetEntity(TransformUsageFlags.None);
 
+            // Mirror shared geometry from GridConfigAuthoring into NavigationConfig
+            // so all nav Burst jobs get everything from one struct.
             AddComponent(entity, new NavigationConfig
             {
-                CellSize = authoring.cellSize,
-                ChunkCellCount = authoring.chunkCellCount,
-                ActiveRingRadius = authoring.activeRingRadius,
-                GhostRingRadius = authoring.ghostRingRadius,
-                AgentRadius = authoring.agentRadius,
-                UnwalkablePhysicsLayer = authoring.unwalkableLayer,
-                GroundPhysicsLayer = authoring.groundLayer,
-                MaxSlopeAngle = authoring.maxSlopeAngle,
-                BakeRaycastHeight = authoring.bakeRaycastHeight
+                CellSize = g.cellSize,
+                ChunkCellCount = g.chunkCellCount,
+                ActiveRingRadius = g.activeRingRadius,
+                GhostRingRadius = g.ghostRingRadius,
+                AgentRadius = g.agentRadius,
+                UnwalkablePhysicsLayer = g.unwalkableLayer,
+                GroundPhysicsLayer = g.groundLayer,
+                MaxSlopeAngle = g.maxSlopeAngle,
+                BakeRaycastHeight = g.bakeRaycastHeight,
             });
 
-            // FlowField registry singleton
+            // FlowField registry singleton (navigation-internal)
             AddComponent(entity, new FlowFieldRegistry { NextId = 0 });
-
-            // Terrain cost table — edit these values to tune terrain weights
-            var builder = new BlobBuilder(Allocator.Temp);
-            ref TerrainCostBlob blob = ref builder.ConstructRoot<TerrainCostBlob>();
-            var costs = builder.Allocate(ref blob.Costs, 256);
-
-            for (int i = 0; i < 256; i++) costs[i] = 10; // Default: all normal cost
-            costs[0] = 10;  // Tier 0: normal ground
-            costs[1] = 15;  // Tier 1: grass / light terrain
-            costs[2] = 25;  // Tier 2: mud / heavy terrain
-            costs[3] = 5;   // Tier 3: road / paved (faster)
-
-            var blobRef = builder.CreateBlobAssetReference<TerrainCostBlob>(Allocator.Persistent);
-            builder.Dispose();
-            AddBlobAsset(ref blobRef, out _);
-            AddComponent(entity, new TerrainCostTable { Blob = blobRef });
         }
     }
 }
