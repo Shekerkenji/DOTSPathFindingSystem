@@ -1,0 +1,169 @@
+﻿// =============================================================================
+// GPUSkinning.compute
+//
+// Runs once per frame BEFORE rendering. Skins every vertex of every instance
+// into a flat GraphicsBuffer. The vertex shader then just reads from that buffer
+// with no texture sampling at all.
+//
+// Dispatch: one thread per vertex per instance.
+//   groupX = ceil(vertexCount / 64)
+//   groupY = instanceCount
+//   groupZ = 1
+//
+// Buffer layout (SkinnedVertex):
+//   float3 position  (12 bytes)
+//   float  pad0      ( 4 bytes)
+//   float3 normal    (12 bytes)
+//   float  pad1      ( 4 bytes)
+//   = 32 bytes per vertex
+//
+// Total buffer size = instanceCount * vertexCount * 32 bytes
+// For 60 instances * 5000 verts = 300,000 * 32 = ~9.6 MB — fine.
+// =============================================================================
+#pragma kernel SkinMeshes
+
+// ── Animation texture (pre-multiplied skinMat = animMat * bindPose) ──────────
+Texture2D<float4> _AnimTex;
+SamplerState sampler_AnimTex; // Point clamp — no interpolation in compute
+float4 _AnimTex_TexelSize;
+
+// ── Per-instance data (one entry per instance) ────────────────────────────────
+struct InstanceAnimData
+{
+    float FrameA;
+    float FrameB;
+    float Blend;
+    float Pad;
+};
+StructuredBuffer<InstanceAnimData> _InstanceAnimData;
+StructuredBuffer<float4x4> _InstanceMatrices;
+
+// ── Source mesh data (shared across all instances, read-only) ─────────────────
+StructuredBuffer<float3> _SrcPositions; // bind-pose positions
+StructuredBuffer<float3> _SrcNormals; // bind-pose normals
+StructuredBuffer<float4> _BoneWeights; // xy = weights 0,1  zw = weights 2,3
+StructuredBuffer<uint4> _BoneIndices; // xyzw = indices 0,1,2,3
+uint _VertexCount;
+
+// ── Output: skinned vertices for ALL instances, packed flat ───────────────────
+// Layout: instance 0 verts [0..V-1], instance 1 verts [V..2V-1], ...
+struct SkinnedVertex
+{
+    float3 position;
+    float pad0;
+    float3 normal;
+    float pad1;
+};
+RWStructuredBuffer<SkinnedVertex> _SkinnedVertices;
+
+// ── Sample a 4x4 skin matrix from the animation texture ───────────────────────
+float4x4 SampleSkinMatrix(float row, uint bone)
+{
+    // Use explicit texel fetch (no sampler interpolation) for correctness.
+    // The texture stores rows of the matrix, row-major.
+    float v = (row + 0.5) * _AnimTex_TexelSize.y;
+    float uBase = (bone * 4 + 0.5) * _AnimTex_TexelSize.x;
+    float4 r0 = _AnimTex.SampleLevel(sampler_AnimTex, float2(uBase, v), 0);
+    float4 r1 = _AnimTex.SampleLevel(sampler_AnimTex, float2(uBase + _AnimTex_TexelSize.x, v), 0);
+    float4 r2 = _AnimTex.SampleLevel(sampler_AnimTex, float2(uBase + 2 * _AnimTex_TexelSize.x, v), 0);
+    float4 r3 = _AnimTex.SampleLevel(sampler_AnimTex, float2(uBase + 3 * _AnimTex_TexelSize.x, v), 0);
+    return float4x4(r0, r1, r2, r3);
+}
+
+[numthreads(64, 1, 1)]
+void SkinMeshes(uint3 id : SV_DispatchThreadID)
+{
+    uint vertIdx = id.x; // vertex index within the mesh
+    uint instIdx = id.y; // instance index
+
+    if (vertIdx >= _VertexCount)
+        return;
+
+    InstanceAnimData anim = _InstanceAnimData[instIdx];
+    float4x4 worldMat = _InstanceMatrices[instIdx];
+
+    float3 srcPos = _SrcPositions[vertIdx];
+    float3 srcNorm = _SrcNormals[vertIdx];
+    float4 wgts = _BoneWeights[vertIdx]; // xy=w01, zw=w23
+    uint4 idxs = _BoneIndices[vertIdx]; // xyzw=b0123
+
+    float4 posH = float4(srcPos, 1.0);
+    float4 normH = float4(srcNorm, 0.0);
+
+    // ── Skin for FrameA ───────────────────────────────────────────────────────
+    float3 posA = 0, normA = 0;
+    if (wgts.x > 0.001)
+    {
+        float4x4 m = SampleSkinMatrix(anim.FrameA, idxs.x);
+        posA += wgts.x * mul(m, posH).xyz;
+        normA += wgts.x * mul(m, normH).xyz;
+    }
+    if (wgts.y > 0.001)
+    {
+        float4x4 m = SampleSkinMatrix(anim.FrameA, idxs.y);
+        posA += wgts.y * mul(m, posH).xyz;
+        normA += wgts.y * mul(m, normH).xyz;
+    }
+    if (wgts.z > 0.001)
+    {
+        float4x4 m = SampleSkinMatrix(anim.FrameA, idxs.z);
+        posA += wgts.z * mul(m, posH).xyz;
+        normA += wgts.z * mul(m, normH).xyz;
+    }
+    if (wgts.w > 0.001)
+    {
+        float4x4 m = SampleSkinMatrix(anim.FrameA, idxs.w);
+        posA += wgts.w * mul(m, posH).xyz;
+        normA += wgts.w * mul(m, normH).xyz;
+    }
+
+    float3 finalPos, finalNorm;
+
+    // ── Blend with FrameB if transitioning ────────────────────────────────────
+    if (anim.Blend > 0.001)
+    {
+        float3 posB = 0, normB = 0;
+        if (wgts.x > 0.001)
+        {
+            float4x4 m = SampleSkinMatrix(anim.FrameB, idxs.x);
+            posB += wgts.x * mul(m, posH).xyz;
+            normB += wgts.x * mul(m, normH).xyz;
+        }
+        if (wgts.y > 0.001)
+        {
+            float4x4 m = SampleSkinMatrix(anim.FrameB, idxs.y);
+            posB += wgts.y * mul(m, posH).xyz;
+            normB += wgts.y * mul(m, normH).xyz;
+        }
+        if (wgts.z > 0.001)
+        {
+            float4x4 m = SampleSkinMatrix(anim.FrameB, idxs.z);
+            posB += wgts.z * mul(m, posH).xyz;
+            normB += wgts.z * mul(m, normH).xyz;
+        }
+        if (wgts.w > 0.001)
+        {
+            float4x4 m = SampleSkinMatrix(anim.FrameB, idxs.w);
+            posB += wgts.w * mul(m, posH).xyz;
+            normB += wgts.w * mul(m, normH).xyz;
+        }
+        finalPos = lerp(posA, posB, anim.Blend);
+        finalNorm = normalize(lerp(normA, normB, anim.Blend));
+    }
+    else
+    {
+        finalPos = posA;
+        finalNorm = normalize(normA);
+    }
+
+    // ── Transform to world space ──────────────────────────────────────────────
+    float3 posWS = mul(worldMat, float4(finalPos, 1.0)).xyz;
+    float3 normWS = normalize(mul((float3x3) worldMat, finalNorm));
+
+    // ── Write output ──────────────────────────────────────────────────────────
+    uint outIdx = instIdx * _VertexCount + vertIdx;
+    _SkinnedVertices[outIdx].position = posWS;
+    _SkinnedVertices[outIdx].pad0 = 0;
+    _SkinnedVertices[outIdx].normal = normWS;
+    _SkinnedVertices[outIdx].pad1 = 0;
+}

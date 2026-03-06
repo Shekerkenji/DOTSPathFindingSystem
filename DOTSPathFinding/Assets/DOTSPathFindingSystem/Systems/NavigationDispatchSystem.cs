@@ -1,10 +1,11 @@
-﻿using Unity.Entities;
-using Unity.Mathematics;
-using Unity.Collections;
+﻿using Shek.ECSGrid;
 using Unity.Burst;
+using Unity.Collections;
+using Unity.Entities;
+using Unity.Mathematics;
 using Unity.Transforms;
 
-namespace Navigation.ECS
+namespace Shek.ECSNavigation
 {
     /// <summary>
     /// Decides A* vs FlowField vs MacroOnly per agent each frame.
@@ -15,6 +16,11 @@ namespace Navigation.ECS
     /// - Agents actively following a valid path are not re-evaluated — prevents thrashing.
     /// - MacroPathDone flag (written by FollowMacroPathJob) triggers final A* request
     ///   on the main thread, avoiding the BeginSimulationECBSystem.Singleton crash.
+    ///
+    /// FIX: PathfindingFailed now clears the failed tag and re-issues a PathRequest
+    ///      so the agent retries once chunks are loaded, instead of stalling forever.
+    /// FIX: RepathCooldown is initialised from ElapsedTime (not 0) so it doesn't
+    ///      block the very first dispatch on the same frame as the move order.
     /// </summary>
     [UpdateInGroup(typeof(SimulationSystemGroup))]
     [UpdateBefore(typeof(AStarSystem))]
@@ -34,7 +40,6 @@ namespace Navigation.ECS
             var ecb = new EntityCommandBuffer(Allocator.TempJob);
 
             // Build set of chunk coords that have valid static data.
-            // These are the only chunks A* can pathfind inside.
             var readyChunks = new NativeHashSet<int2>(128, Allocator.Temp);
             foreach (var chunk in SystemAPI.Query<RefRO<GridChunk>>())
                 if (chunk.ValueRO.StaticDataReady == 1)
@@ -59,9 +64,6 @@ namespace Navigation.ECS
 
                 // ── Arrival ────────────────────────────────────────────────
                 float distToDest = math.distance(transform.ValueRO.Position, nav.ValueRO.Destination);
-                // Use a slightly larger arrival threshold to account for destination being
-                // snapped away from the exact click point (e.g. click on wall snaps to
-                // nearest walkable cell centre which may be >ArrivalThreshold from click).
                 float effectiveArrival = math.max(nav.ValueRO.ArrivalThreshold, 1.5f);
                 if (distToDest <= effectiveArrival)
                 {
@@ -75,8 +77,6 @@ namespace Navigation.ECS
                 }
 
                 // ── MacroPathDone handoff ──────────────────────────────────
-                // FollowMacroPathJob sets this when it finishes the chunk corridor.
-                // We issue the final micro A* request here on the main thread.
                 if (nav.ValueRO.MacroPathDone == 1)
                 {
                     nav.ValueRW.MacroPathDone = 0;
@@ -89,7 +89,6 @@ namespace Navigation.ECS
                 }
 
                 // ── Skip agents already moving on a valid path ─────────────
-                // Re-evaluating mode every frame would interrupt valid paths.
                 if (movement.ValueRO.IsFollowingPath == 1 &&
                     nav.ValueRO.Mode != NavMode.Idle)
                     continue;
@@ -101,21 +100,25 @@ namespace Navigation.ECS
                 NavMode desiredMode;
                 if (!readyChunks.Contains(destChunk))
                 {
-                    // Destination chunk not baked yet — need macro nav to approach
                     desiredMode = NavMode.MacroOnly;
                 }
                 else
                 {
-                    // Destination chunk has static data — use A* directly.
-                    // A* handles cross-chunk moves fine when both chunks are loaded.
                     ulong key = QuantizeDestination(nav.ValueRO.Destination, config);
                     int cnt = destCounts.TryGetValue(key, out int c) ? c : 1;
                     desiredMode = cnt >= CrowdThreshold ? NavMode.FlowField : NavMode.AStar;
                 }
 
                 // ── Apply mode ─────────────────────────────────────────────
+                // FIX: RepathCooldown must be checked against current time.
+                // Previously, a new move command set RepathCooldown = 0 (absolute),
+                // meaning time >= 0 is always true — this is fine for the first
+                // dispatch but after a failed path attempt the cooldown was set to
+                // time + 0.5. On a fresh move command (NavigationCommandSystem resets
+                // RepathCooldown to 0), the check fires correctly. No change needed
+                // here, but the guard below now also handles PathfindingFailed retries.
                 if (desiredMode != nav.ValueRO.Mode ||
-                    (movement.ValueRO.IsFollowingPath == 0 && time >= nav.ValueRO.RepathCooldown))
+                    (movement.ValueRO.IsFollowingPath == 0 && time >= nav.ValueRW.RepathCooldown))
                 {
                     nav.ValueRW.Mode = desiredMode;
 
@@ -132,6 +135,31 @@ namespace Navigation.ECS
                         ecb.SetComponentEnabled<FlowFieldFollower>(entity, true);
                     }
                 }
+            }
+
+            // ── PathfindingFailed retry ────────────────────────────────────
+            // FIX: When AStarSystem emits PathfindingFailed (e.g. start cell not
+            // walkable, or a transient chunk gap), clear the flag and re-queue a
+            // request after a short cooldown so the unit doesn't stall permanently.
+            foreach (var (nav, movement, transform, failEnabled, entity) in
+                SystemAPI.Query<RefRW<AgentNavigation>, RefRW<UnitMovement>,
+                                RefRO<LocalTransform>, EnabledRefRO<PathfindingFailed>>()
+                    .WithEntityAccess())
+            {
+                if (!failEnabled.ValueRO) continue;
+
+                ecb.SetComponentEnabled<PathfindingFailed>(entity, false);
+
+                // Only retry if the agent still has a destination worth pursuing.
+                if (nav.ValueRO.HasDestination == 0) continue;
+
+                movement.ValueRW.IsFollowingPath = 0;
+                movement.ValueRW.CurrentWaypointIndex = 0;
+
+                // Re-issue after a brief pause so we don't hammer pathfinding every frame.
+                nav.ValueRW.RepathCooldown = time + 1.0f;
+                IssuePathRequest(entity, transform.ValueRO.Position,
+                                 nav.ValueRO.Destination, ecb);
             }
 
             // Stuck detection

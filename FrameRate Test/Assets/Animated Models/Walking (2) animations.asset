@@ -1,0 +1,48 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bd2e7995e50bfc84db01dd91bcad23b5, type: 3}
+  m_Name: Walking (2) animations
+  m_EditorClassIdentifier: Assembly-CSharp::AnimatedMeshScriptableObjectECS
+  AnimationFPS: 30
+  Clips:
+  - Name: mixamo.com
+    Frames:
+    - {fileID: 4300000, guid: 5f1beb0b692bc9046a5e0f9777d1dd33, type: 2}
+    - {fileID: 4300000, guid: 03e6529d1b96ef04693cce881fc6c7d1, type: 2}
+    - {fileID: 4300000, guid: 3ab5a80ed20d22841aba2711cc01e0b7, type: 2}
+    - {fileID: 4300000, guid: cd8169bd9ebd77a4681d1351fc8ca098, type: 2}
+    - {fileID: 4300000, guid: 5d894493f8b7f6d43a65c9f90a785d48, type: 2}
+    - {fileID: 4300000, guid: 1026d7e81ad10794f9f3980abf27f4e6, type: 2}
+    - {fileID: 4300000, guid: 48fda2b875d2d6e4f83af66878c7588a, type: 2}
+    - {fileID: 4300000, guid: b719f5fdf96a9f345b8dbec136d95f68, type: 2}
+    - {fileID: 4300000, guid: da78e1716a8a4ac4b81e796162171820, type: 2}
+    - {fileID: 4300000, guid: 1bd742869e1e5c744b99de2517060a41, type: 2}
+    - {fileID: 4300000, guid: 2335ffbc1f770e645a9b296aae2240d6, type: 2}
+    - {fileID: 4300000, guid: bd7bfebfdea422a478c4d23770b2a986, type: 2}
+    - {fileID: 4300000, guid: ce2afb6dede447d4296830224bccaee4, type: 2}
+    - {fileID: 4300000, guid: c3950ff2a6ee8c24ea3c2a435b5699ae, type: 2}
+    - {fileID: 4300000, guid: 2bc2dee7da52e2d4291b64ae4fe6d895, type: 2}
+    - {fileID: 4300000, guid: faf0747391e51ad4fbf2b3f386ea9353, type: 2}
+    - {fileID: 4300000, guid: fab9208b76e2e5740b5d79704eeb4cae, type: 2}
+    - {fileID: 4300000, guid: 2638be1894b9b084aaf4a2bc78617d83, type: 2}
+    - {fileID: 4300000, guid: aff6971b216e2f24e8db988dc117c17d, type: 2}
+    - {fileID: 4300000, guid: a1348ed8041e6c64d814c300ec53f177, type: 2}
+    - {fileID: 4300000, guid: d938f073523069e498eb3a9777591209, type: 2}
+    - {fileID: 4300000, guid: fa123473494f3c84199d2c5d81788139, type: 2}
+    - {fileID: 4300000, guid: 6dd0fc9a6d22f254ba901d3dfe716ae1, type: 2}
+    - {fileID: 4300000, guid: fe5128ae3932f294b8d523a80153ee39, type: 2}
+    - {fileID: 4300000, guid: 196261a8388915b438bdd9f973233c80, type: 2}
+    - {fileID: 4300000, guid: 840534adccfded94fbc52a488bf6eb12, type: 2}
+    - {fileID: 4300000, guid: cdb2d1d19dc8f0046b4f58e7592b7a83, type: 2}
+    - {fileID: 4300000, guid: a135ddef69b62fd44a6d5fe19d1e7deb, type: 2}
+    - {fileID: 4300000, guid: a24ce23dca2f0914bbb70f8a10969b43, type: 2}
+    - {fileID: 4300000, guid: 7f26daa1f9674d54390b5ba52a8fecc7, type: 2}
