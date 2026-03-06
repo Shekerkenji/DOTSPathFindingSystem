@@ -25,7 +25,7 @@ namespace Shek.ECSGamePlay
     ///   Right click        � move selected units to clicked ground point
     ///   Escape             � deselect all
     /// </summary>
-    public class RTSConfigAuthoring : MonoBehaviour
+    public class SelectUnitsConfigAuthoring : MonoBehaviour
     {
         [Header("Camera")]
         public float panSpeed = 20f;
@@ -50,9 +50,9 @@ namespace Shek.ECSGamePlay
         public LayerMask groundLayer = ~0;
     }
 
-    public class RTSConfigBaker : Baker<RTSConfigAuthoring>
+    public class RTSConfigBaker : Baker<SelectUnitsConfigAuthoring>
     {
-        public override void Bake(RTSConfigAuthoring a)
+        public override void Bake(SelectUnitsConfigAuthoring a)
         {
             // TransformUsageFlags.None � this entity has no transform, it's a pure singleton
             var entity = GetEntity(TransformUsageFlags.None);
