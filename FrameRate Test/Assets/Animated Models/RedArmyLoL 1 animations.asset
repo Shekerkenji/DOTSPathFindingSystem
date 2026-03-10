@@ -1,0 +1,46 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bd2e7995e50bfc84db01dd91bcad23b5, type: 3}
+  m_Name: RedArmyLoL 1 animations
+  m_EditorClassIdentifier: Assembly-CSharp::AnimatedMeshScriptableObjectECS
+  AnimationFPS: 28
+  Clips:
+  - Name: mixamo.com
+    Frames:
+    - {fileID: 4300000, guid: 9478d4e7b3a45034ea2cd582ba59fbd8, type: 2}
+    - {fileID: 4300000, guid: b6ec09d533534424a9f4f7ae183b78a9, type: 2}
+    - {fileID: 4300000, guid: b7936e39170ad5241891d70e67ab1c30, type: 2}
+    - {fileID: 4300000, guid: 1ee3d7e20f9a43948b60abe55eb9aa24, type: 2}
+    - {fileID: 4300000, guid: 2c25318aaa6e65e48b9151bf06339f78, type: 2}
+    - {fileID: 4300000, guid: ad24f577811b63a4499c8af44189dbc2, type: 2}
+    - {fileID: 4300000, guid: f3e2c9e5929267942b80b6a3fb030d7b, type: 2}
+    - {fileID: 4300000, guid: b9dcb19e6162df64baabbece10e50993, type: 2}
+    - {fileID: 4300000, guid: 1ec05af0d545c3c47bd7e288c748b0bc, type: 2}
+    - {fileID: 4300000, guid: d723cff5c90ebaa44942325d9e6ef941, type: 2}
+    - {fileID: 4300000, guid: bb9427944773cf4468b2c856a9cb86c0, type: 2}
+    - {fileID: 4300000, guid: 538c806a93cfbd6459c4e054998ebdeb, type: 2}
+    - {fileID: 4300000, guid: 0de401fb3215b084c89c2b23c03b57a2, type: 2}
+    - {fileID: 4300000, guid: 9c303709eb6d68248b309e29994b8929, type: 2}
+    - {fileID: 4300000, guid: 2f05ef5ccd91a414b96058e81966a0f4, type: 2}
+    - {fileID: 4300000, guid: 378eb26ec656edc4d8ec04dbcf1f3a86, type: 2}
+    - {fileID: 4300000, guid: 2521c89bf66a38f4f865e391d98d3e37, type: 2}
+    - {fileID: 4300000, guid: d5d0f44b79ba09b43b58f8f25e84f8d8, type: 2}
+    - {fileID: 4300000, guid: fc117f56173d8e24abdb7aa184a58918, type: 2}
+    - {fileID: 4300000, guid: 65ab6c1062bd31045a4585999115ca8f, type: 2}
+    - {fileID: 4300000, guid: a20a2b419dfccb74f9a0bc3364c6d3e2, type: 2}
+    - {fileID: 4300000, guid: db5edd978f82f654eb59b2489df97995, type: 2}
+    - {fileID: 4300000, guid: e97906603d9b926498c3c2d5d03b2377, type: 2}
+    - {fileID: 4300000, guid: c5b644f9cf46aed41919069edb0f1215, type: 2}
+    - {fileID: 4300000, guid: c5ff540b2a2a6df43aa87e3e69e4565e, type: 2}
+    - {fileID: 4300000, guid: 144dbe258a04b5c4d9eb411e6d1d6977, type: 2}
+    - {fileID: 4300000, guid: 7c36eed96736a0640b846909875e4c98, type: 2}
+    - {fileID: 4300000, guid: bd758bee64eabe94fb241632465c0df7, type: 2}
