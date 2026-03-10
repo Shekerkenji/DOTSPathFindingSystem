@@ -10,10 +10,16 @@ public struct Unit : IComponentData
     public Faction Faction;
     public UnitStance State;
     public byte PopulationCost;
-    public byte Size; //cell size;
+    public byte2 Size; //cell size;
     public int AttackDamage;
     public float AttackSpeed; 
     public float MovementSpeed;
+}
+
+public struct byte2
+{
+    public byte x;
+    public byte y;
 }
 
 public struct HealthComponent : IComponentData

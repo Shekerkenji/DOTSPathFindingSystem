@@ -50,7 +50,7 @@ public partial struct UnitSelectionSystem : ISystem
             SystemAPI.Query<RefRO<LocalTransform>, RefRO<Unit>, RefRO<SelectableTag>>()
                      .WithEntityAccess())
         {
-            float radius = math.max(0.5f, unit.ValueRO.Size * 0.5f);
+            float radius = math.max(0.5f, unit.ValueRO.Size.x * unit.ValueRO.Size.y * 0.5f);
             float dist = RayVsCylinder(
                 input.RayOrigin, input.RayDirection,
                 transform.ValueRO.Position, radius, radius * 4f);

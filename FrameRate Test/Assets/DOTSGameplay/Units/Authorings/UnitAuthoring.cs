@@ -12,7 +12,7 @@ public class UnitAuthoring : MonoBehaviour
     public Faction faction;
     public UnitStance state;
     public byte populationCost;
-    public byte size; //cell size;
+    public byte2 size; //cell size;
     public int health;
     public int attackDamage;
     public float attackSpeed;
